@@ -26,13 +26,16 @@ class ConversionMode(Enum):
 @dataclass
 class ConverterConfig:
     """转换器配置"""
-    # 目标后端类型: "openai" (Chat Completions), "anthropic", 或 "openrouter"
+    # 目标后端类型:
+    #   "openai"          - OpenAI Chat Completions 兼容 (/v1/chat/completions)
+    #   "openai_responses" - OpenAI Responses 兼容 (/v1/responses)
+    #   "anthropic"       - Anthropic Messages 兼容 (/v1/messages)
     backend_type: str = "openai"
     
     # 目标后端 URL
-    # OpenAI Chat: https://api.openai.com/v1/chat/completions
-    # Anthropic: https://api.minimaxi.com/anthropic/v1/messages
-    # OpenRouter Responses: https://openrouter.ai/api/v1/responses
+    # OpenAI Chat:      https://api.openai.com/v1/chat/completions
+    # OpenAI Responses: https://api.openai.com/v1/responses
+    # Anthropic:        https://api.anthropic.com/v1/messages
     backend_url: str = "https://api.openai.com/v1/chat/completions"
     
     # API 密钥
@@ -53,7 +56,7 @@ class ConverterConfig:
     # 其他请求参数
     extra_body: Dict[str, Any] = field(default_factory=dict)
     
-    # 模型映射表：Anthropic/OpenAI 模型名 -> 目标后端模型名
+    # 模型映射表：模型名 -> 目标后端模型名
     model_mapping: Dict[str, str] = field(default_factory=dict)
     
     def get_model(self, model: str) -> str:
@@ -67,12 +70,8 @@ class ConverterConfig:
                 "x-api-key": self.api_key or "",
                 "anthropic-version": "2023-06-01"
             }
-        elif self.backend_type == "openrouter":
-            return {
-                "Authorization": f"Bearer {self.api_key or ''}",
-                "X-OpenRouter-Experimental-Metadata": "enabled"
-            }
         else:
+            # openai 和 openai_responses 均使用 Bearer 认证
             return {
                 "Authorization": f"Bearer {self.api_key or ''}"
             }

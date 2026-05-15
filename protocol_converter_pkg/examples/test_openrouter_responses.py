@@ -1,5 +1,5 @@
 """
-集成测试 - OpenRouter Responses API (OpenAI Responses 格式)
+集成测试 - OpenAI Responses 协议 (使用 OpenRouter 端点测试)
 """
 
 import asyncio
@@ -12,9 +12,9 @@ from protocol_converter import (
 )
 
 
-# OpenRouter Responses API 配置
-OPENROUTER_RESPONSES_CONFIG = ConverterConfig(
-    backend_type="openrouter",
+# OpenAI Responses API 配置 (使用 OpenRouter 端点测试)
+RESPONSES_CONFIG = ConverterConfig(
+    backend_type="openai_responses",
     backend_url="https://openrouter.ai/api/v1/responses",
     api_key="REDACTED_OPENROUTER_API_KEY",
     default_model="openai/gpt-oss-120b:free",
@@ -25,7 +25,7 @@ OPENROUTER_RESPONSES_CONFIG = ConverterConfig(
 async def test_openrouter_responses_direct():
     """测试 OpenRouter - 直接发送 OpenAI Responses 格式"""
     print("\n" + "=" * 60)
-    print("测试 1: OpenRouter Responses API (直接发送 Responses 格式)")
+    print("测试 1: OpenAI Responses API (直接发送 Responses 格式)")
     print("=" * 60)
     
     request = {
@@ -40,12 +40,12 @@ async def test_openrouter_responses_direct():
         
         headers = {
             "Content-Type": "application/json",
-            **OPENROUTER_RESPONSES_CONFIG.get_auth_headers()
+            **RESPONSES_CONFIG.get_auth_headers()
         }
         
-        async with httpx.AsyncClient(timeout=OPENROUTER_RESPONSES_CONFIG.timeout) as client:
+        async with httpx.AsyncClient(timeout=RESPONSES_CONFIG.timeout) as client:
             response = await client.post(
-                OPENROUTER_RESPONSES_CONFIG.backend_url,
+                RESPONSES_CONFIG.backend_url,
                 headers=headers,
                 json=request
             )
@@ -93,12 +93,12 @@ async def test_openrouter_from_openai_chat():
         
         headers = {
             "Content-Type": "application/json",
-            **OPENROUTER_RESPONSES_CONFIG.get_auth_headers()
+            **RESPONSES_CONFIG.get_auth_headers()
         }
         
-        async with httpx.AsyncClient(timeout=OPENROUTER_RESPONSES_CONFIG.timeout) as client:
+        async with httpx.AsyncClient(timeout=RESPONSES_CONFIG.timeout) as client:
             response = await client.post(
-                OPENROUTER_RESPONSES_CONFIG.backend_url,
+                RESPONSES_CONFIG.backend_url,
                 headers=headers,
                 json=responses_request
             )
@@ -151,12 +151,12 @@ async def test_openrouter_from_anthropic():
         
         headers = {
             "Content-Type": "application/json",
-            **OPENROUTER_RESPONSES_CONFIG.get_auth_headers()
+            **RESPONSES_CONFIG.get_auth_headers()
         }
         
-        async with httpx.AsyncClient(timeout=OPENROUTER_RESPONSES_CONFIG.timeout) as client:
+        async with httpx.AsyncClient(timeout=RESPONSES_CONFIG.timeout) as client:
             response = await client.post(
-                OPENROUTER_RESPONSES_CONFIG.backend_url,
+                RESPONSES_CONFIG.backend_url,
                 headers=headers,
                 json=responses_request
             )
@@ -180,7 +180,7 @@ async def test_openrouter_from_anthropic():
 async def run_all_tests():
     """运行所有测试"""
     print("=" * 60)
-    print("协议转换器 - OpenRouter Responses API 测试")
+    print("协议转换器 - OpenAI Responses API 测试")
     print("端点: https://openrouter.ai/api/v1/responses")
     print("=" * 60)
     
