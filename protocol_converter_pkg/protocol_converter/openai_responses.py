@@ -408,19 +408,22 @@ class OpenAIResponsesConverter:
             elif item_type == "input_image":
                 has_multimodal = True
                 image_url = item.get("image_url", "")
+                detail = item.get("detail")  # Responses API 支持 detail 参数
+                img_obj = {}
                 if image_url:
-                    content_parts.append({
-                        "type": "image_url",
-                        "image_url": {"url": image_url}
-                    })
+                    img_obj["url"] = image_url
                 else:
                     # base64 图片
                     data_url = item.get("image_url", item.get("data", ""))
                     if data_url:
-                        content_parts.append({
-                            "type": "image_url",
-                            "image_url": {"url": data_url}
-                        })
+                        img_obj["url"] = data_url
+                if detail and img_obj:
+                    img_obj["detail"] = detail
+                if img_obj:
+                    content_parts.append({
+                        "type": "image_url",
+                        "image_url": img_obj
+                    })
             
             elif item_type == "input_file":
                 has_multimodal = True
@@ -714,9 +717,15 @@ class OpenAIResponsesConverter:
         if request.get("metadata"):
             responses_request["metadata"] = request["metadata"]
         
-        # reasoning_effort -> reasoning
+        # reasoning_effort -> reasoning (含 effort + summary)
         if request.get("reasoning_effort"):
-            responses_request["reasoning"] = {"effort": request["reasoning_effort"]}
+            reasoning_config = {"effort": request["reasoning_effort"]}
+            # 如果 extra_body 中有原始 reasoning 配置（含 summary），合并
+            if isinstance(request.get("extra_body"), dict):
+                original_reasoning = request["extra_body"].get("reasoning")
+                if isinstance(original_reasoning, dict) and original_reasoning.get("summary") is not None:
+                    reasoning_config["summary"] = original_reasoning["summary"]
+            responses_request["reasoning"] = reasoning_config
         
         # response_format -> text
         if request.get("response_format"):
@@ -801,11 +810,15 @@ class OpenAIResponsesConverter:
                     result.append({"type": "input_image", "image_url": str(url)})
             elif item_type == "file":
                 file_data = item.get("file", {})
-                result.append({
+                input_file = {
                     "type": "input_file",
                     "file_data": file_data.get("file_data", ""),
                     "filename": file_data.get("filename", "")
-                })
+                }
+                # 保留 mime_type（Responses API 支持）
+                if file_data.get("mime_type"):
+                    input_file["mime_type"] = file_data["mime_type"]
+                result.append(input_file)
             else:
                 text = item.get("text", "")
                 if text:
@@ -973,6 +986,7 @@ class OpenAIResponsesConverter:
             "incomplete_details": incomplete_details,
             "error": None,
             "metadata": response.get("metadata"),
+            "parallel_tool_calls": True,  # Chat API 默认允许并行工具调用
         }
         
         # 添加可选字段（如果 Chat 响应中存在）
@@ -980,6 +994,11 @@ class OpenAIResponsesConverter:
             result["service_tier"] = response["service_tier"]
         if response.get("system_fingerprint"):
             result["system_fingerprint"] = response["system_fingerprint"]
+        # 温度和 top_p 如果原始请求中有
+        if response.get("temperature") is not None:
+            result["temperature"] = response["temperature"]
+        if response.get("top_p") is not None:
+            result["top_p"] = response["top_p"]
         
         return result
     
@@ -1296,9 +1315,9 @@ class OpenAIResponsesConverter:
                         "content": []
                     }
                 })
-            # 推理增量 - 使用自定义事件类型 (Responses API 没有标准的 reasoning delta 事件)
+            # 推理增量 - 使用 Responses API 官方事件类型 response.reasoning_text.delta
             events.append({
-                "type": "response.reasoning.delta",
+                "type": "response.reasoning_text.delta",
                 "output_index": output_idx,
                 "delta": reasoning_content
             })
@@ -1423,6 +1442,12 @@ class OpenAIResponsesConverter:
             
             # 关闭 reasoning 项
             if cls._stream_state["reasoning_item_started"]:
+                # 先发 response.reasoning_text.done 事件
+                events.append({
+                    "type": "response.reasoning_text.done",
+                    "output_index": output_idx,
+                    "text": ""  # 完整文本在流式场景中无法精确获取
+                })
                 events.append({
                     "type": "response.output_item.done",
                     "output_index": output_idx,

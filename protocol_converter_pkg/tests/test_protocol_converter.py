@@ -1069,12 +1069,17 @@ class TestAnthropicStreamingSequence:
         
         events = AnthropicConverter.convert_stream_chunk(thinking_chunk)
         
-        # 应该有 content_block_start + content_block_delta
-        assert len(events) == 2
+        # 应该有 content_block_start + thinking_delta + signature_delta
+        assert len(events) == 3
         assert events[0]["type"] == "content_block_start"
         assert events[0]["content_block"]["type"] == "thinking"
+        # thinking_delta
         assert events[1]["type"] == "content_block_delta"
         assert events[1]["delta"]["type"] == "thinking_delta"
+        assert events[1]["delta"]["thinking"] == "Let me think..."
+        # signature_delta (Anthropic SDK 要求)
+        assert events[2]["type"] == "content_block_delta"
+        assert events[2]["delta"]["type"] == "signature_delta"
 
     def test_tool_use_content_block_start(self):
         """测试 tool_use 的 content_block_start 事件"""
@@ -2088,3 +2093,332 @@ class TestAnthropicReasoningTokensNotMappedToServerToolUse:
         assert "server_tool_use" not in result["usage"]
         # output_tokens 应该正常
         assert result["usage"]["output_tokens"] == 20
+
+
+class TestAnthropicServiceTierMapping:
+    """测试 Anthropic service_tier 值的正确双向映射"""
+
+    def test_anthropic_response_standard_to_chat_default(self):
+        """测试 Anthropic 响应 usage.service_tier='standard' 映射为 Chat 'default'"""
+        anthropic_response = {
+            "id": "msg_123",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Hello"}],
+            "model": "claude-sonnet-4-20250514",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 5, "service_tier": "standard"}
+        }
+        config = ConverterConfig(backend_type="anthropic")
+        engine = ProtocolConverterEngine(config)
+        result = engine._anthropic_to_chat_response(anthropic_response)
+        assert result["usage"]["service_tier"] == "default"
+
+    def test_anthropic_response_priority_to_chat_priority(self):
+        """测试 Anthropic 响应 usage.service_tier='priority' 映射为 Chat 'priority'"""
+        anthropic_response = {
+            "id": "msg_123",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Hello"}],
+            "model": "claude-sonnet-4-20250514",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 5, "service_tier": "priority"}
+        }
+        config = ConverterConfig(backend_type="anthropic")
+        engine = ProtocolConverterEngine(config)
+        result = engine._anthropic_to_chat_response(anthropic_response)
+        assert result["usage"]["service_tier"] == "priority"
+
+    def test_anthropic_response_batch_to_chat_default(self):
+        """测试 Anthropic 响应 usage.service_tier='batch' 映射为 Chat 'default'"""
+        anthropic_response = {
+            "id": "msg_123",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Hello"}],
+            "model": "claude-sonnet-4-20250514",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 5, "service_tier": "batch"}
+        }
+        config = ConverterConfig(backend_type="anthropic")
+        engine = ProtocolConverterEngine(config)
+        result = engine._anthropic_to_chat_response(anthropic_response)
+        assert result["usage"]["service_tier"] == "default"
+
+    def test_chat_service_tier_to_anthropic(self):
+        """测试 Chat service_tier 映射到 Anthropic usage.service_tier"""
+        chat_response = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{
+                "message": {"content": "Hello!"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "service_tier": "default"}
+        }
+        result = AnthropicConverter.from_openai_chat(chat_response)
+        assert result["usage"]["service_tier"] == "standard"
+
+    def test_chat_priority_tier_to_anthropic(self):
+        """测试 Chat service_tier='priority' 映射到 Anthropic 'priority'"""
+        chat_response = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{
+                "message": {"content": "Hello!"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "service_tier": "priority"}
+        }
+        result = AnthropicConverter.from_openai_chat(chat_response)
+        assert result["usage"]["service_tier"] == "priority"
+
+
+class TestAnthropicStreamingSignatureDelta:
+    """测试 Anthropic 流式事件包含 signature_delta"""
+
+    def setup_method(self):
+        AnthropicConverter.reset_stream_state()
+
+    def test_thinking_delta_includes_signature_delta(self):
+        """测试 thinking_delta 后跟随 signature_delta"""
+        start_chunk = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{"delta": {"role": "assistant"}, "index": 0}]
+        }
+        AnthropicConverter.convert_stream_chunk(start_chunk)
+
+        thinking_chunk = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{
+                "delta": {"reasoning_content": "Let me think..."},
+                "index": 0
+            }]
+        }
+
+        events = AnthropicConverter.convert_stream_chunk(thinking_chunk)
+
+        # 应该有 content_block_start + thinking_delta + signature_delta
+        delta_events = [e for e in events if e["type"] == "content_block_delta"]
+        delta_types = [e["delta"]["type"] for e in delta_events]
+        assert "thinking_delta" in delta_types
+        assert "signature_delta" in delta_types
+
+
+class TestResponsesReasoningTextEvents:
+    """测试 Responses 流式使用官方 reasoning_text 事件类型"""
+
+    def setup_method(self):
+        OpenAIResponsesConverter.reset_stream_state()
+
+    def test_reasoning_uses_official_event_type(self):
+        """测试推理增量使用 response.reasoning_text.delta 事件类型"""
+        start_chunk = {
+            "id": "resp_123",
+            "model": "o3",
+            "choices": [{"delta": {"role": "assistant"}, "index": 0}]
+        }
+        OpenAIResponsesConverter.convert_stream_chunk(start_chunk)
+
+        reasoning_chunk = {
+            "id": "resp_123",
+            "model": "o3",
+            "choices": [{
+                "delta": {"reasoning_content": "Let me reason..."},
+                "index": 0
+            }]
+        }
+
+        events = OpenAIResponsesConverter.convert_stream_chunk(reasoning_chunk)
+
+        event_types = [e["type"] for e in events]
+        assert "response.reasoning_text.delta" in event_types
+
+    def test_reasoning_done_on_finish(self):
+        """测试 finish_reason 时发送 response.reasoning_text.done"""
+        start_chunk = {
+            "id": "resp_123",
+            "model": "o3",
+            "choices": [{"delta": {"role": "assistant"}, "index": 0}]
+        }
+        OpenAIResponsesConverter.convert_stream_chunk(start_chunk)
+
+        reasoning_chunk = {
+            "id": "resp_123",
+            "model": "o3",
+            "choices": [{
+                "delta": {"reasoning_content": "Reasoning..."},
+                "index": 0
+            }]
+        }
+        OpenAIResponsesConverter.convert_stream_chunk(reasoning_chunk)
+
+        finish_chunk = {
+            "id": "resp_123",
+            "model": "o3",
+            "choices": [{
+                "delta": {},
+                "finish_reason": "stop",
+                "index": 0
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 20}
+        }
+
+        events = OpenAIResponsesConverter.convert_stream_chunk(finish_chunk)
+
+        event_types = [e["type"] for e in events]
+        assert "response.reasoning_text.done" in event_types
+        assert "response.output_item.done" in event_types
+
+
+class TestResponsesParallelToolCalls:
+    """测试 Responses 响应包含 parallel_tool_calls 字段"""
+
+    def test_from_openai_chat_includes_parallel_tool_calls(self):
+        """测试 Chat 响应转 Responses 包含 parallel_tool_calls"""
+        chat_response = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{
+                "message": {"content": "Hello!"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        }
+
+        result = OpenAIResponsesConverter.from_openai_chat(chat_response)
+
+        assert "parallel_tool_calls" in result
+        assert result["parallel_tool_calls"] is True
+
+
+class TestThinkingDisplayPreservation:
+    """测试 thinking display 字段在转换中正确保留"""
+
+    def test_thinking_display_preserved_chat_to_anthropic(self):
+        """测试 Chat→Anthropic 转换中 thinking display 字段保留"""
+        chat_request = {
+            "model": "o3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "reasoning_effort": "high",
+            "extra_body": {
+                "thinking": {"type": "enabled", "budget_tokens": 32000, "display": "omitted"}
+            }
+        }
+
+        config = ConverterConfig(backend_type="anthropic")
+        engine = ProtocolConverterEngine(config)
+        result = engine._chat_to_anthropic_request(chat_request)
+
+        assert "thinking" in result
+        assert result["thinking"]["type"] == "enabled"
+        assert result["thinking"]["display"] == "omitted"
+
+    def test_thinking_without_display(self):
+        """测试没有 display 的 thinking 配置正常工作"""
+        chat_request = {
+            "model": "o3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "reasoning_effort": "high",
+        }
+
+        config = ConverterConfig(backend_type="anthropic")
+        engine = ProtocolConverterEngine(config)
+        result = engine._chat_to_anthropic_request(chat_request)
+
+        assert "thinking" in result
+        assert result["thinking"]["type"] == "enabled"
+        assert result["thinking"]["budget_tokens"] == 32000
+
+    def test_original_thinking_restored_when_no_reasoning_effort(self):
+        """测试当没有 reasoning_effort 时，从 extra_body 恢复原始 thinking"""
+        chat_request = {
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "extra_body": {
+                "thinking": {"type": "enabled", "budget_tokens": 20000, "display": "summarized"}
+            }
+        }
+
+        config = ConverterConfig(backend_type="anthropic")
+        engine = ProtocolConverterEngine(config)
+        result = engine._chat_to_anthropic_request(chat_request)
+
+        assert "thinking" in result
+        assert result["thinking"]["type"] == "enabled"
+        assert result["thinking"]["budget_tokens"] == 20000
+        assert result["thinking"]["display"] == "summarized"
+
+
+class TestReasoningSummaryPreservation:
+    """测试 reasoning.summary 在 Chat→Responses 转换中保留"""
+
+    def test_reasoning_summary_from_extra_body(self):
+        """测试从 extra_body 中保留 reasoning.summary"""
+        chat_request = {
+            "model": "o3",
+            "messages": [{"role": "user", "content": "Solve this"}],
+            "reasoning_effort": "high",
+            "extra_body": {
+                "reasoning": {"effort": "high", "summary": "detailed"}
+            }
+        }
+
+        result = OpenAIResponsesConverter.from_openai_chat_request(chat_request)
+
+        assert "reasoning" in result
+        assert result["reasoning"]["effort"] == "high"
+        assert result["reasoning"]["summary"] == "detailed"
+
+
+class TestAnthropicServerToolUsage:
+    """测试 Anthropic server_tool_use 在转换中正确保留"""
+
+    def test_server_tool_use_preserved_in_chat_response(self):
+        """测试 Anthropic server_tool_use 在 Chat 响应 usage 中保留"""
+        anthropic_response = {
+            "id": "msg_123",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Search results..."}],
+            "model": "claude-sonnet-4-20250514",
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "server_tool_use": {"web_search_requests": 2, "web_fetch_requests": 1}
+            }
+        }
+
+        config = ConverterConfig(backend_type="anthropic")
+        engine = ProtocolConverterEngine(config)
+        result = engine._anthropic_to_chat_response(anthropic_response)
+
+        assert "server_tool_use" in result["usage"]
+        assert result["usage"]["server_tool_use"]["web_search_requests"] == 2
+
+    def test_cache_creation_preserved_in_chat_response(self):
+        """测试 Anthropic cache_creation 详情在 Chat 响应 usage 中保留"""
+        anthropic_response = {
+            "id": "msg_123",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Hello"}],
+            "model": "claude-sonnet-4-20250514",
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "cache_creation": {"ephemeral_5m_input_tokens": 50, "ephemeral_1h_input_tokens": 30}
+            }
+        }
+
+        config = ConverterConfig(backend_type="anthropic")
+        engine = ProtocolConverterEngine(config)
+        result = engine._anthropic_to_chat_response(anthropic_response)
+
+        assert "cache_creation" in result["usage"]
+        assert result["usage"]["cache_creation"]["ephemeral_5m_input_tokens"] == 50

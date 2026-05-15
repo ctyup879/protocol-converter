@@ -469,12 +469,30 @@ class ProtocolConverterEngine:
             }
             budget = effort_budget_map.get(reasoning_effort, 10000)
             if budget > 0:
-                anthropic_request["thinking"] = {
+                thinking_config = {
                     "type": "enabled",
                     "budget_tokens": budget,
                 }
+                # 如果 extra_body 中有原始 thinking 配置（含 display），保留
+                if isinstance(request.get("extra_body"), dict):
+                    original_thinking = request["extra_body"].get("thinking")
+                    if isinstance(original_thinking, dict) and original_thinking.get("display"):
+                        thinking_config["display"] = original_thinking["display"]
+                anthropic_request["thinking"] = thinking_config
             else:
                 anthropic_request["thinking"] = {"type": "disabled"}
+        # 如果请求中直接包含 thinking 参数（从 Anthropic 转换过来的），优先使用
+        elif isinstance(request.get("extra_body"), dict) and isinstance(request["extra_body"].get("thinking"), dict):
+            original_thinking = request["extra_body"]["thinking"]
+            # 只有当 type 是 enabled 或 adaptive 时才恢复
+            if original_thinking.get("type") in ("enabled", "adaptive"):
+                thinking_config = {
+                    "type": original_thinking["type"],
+                    "budget_tokens": original_thinking.get("budget_tokens", 10000),
+                }
+                if original_thinking.get("display"):
+                    thinking_config["display"] = original_thinking["display"]
+                anthropic_request["thinking"] = thinking_config
         
         # service_tier 映射
         service_tier = request.get("service_tier")
@@ -631,11 +649,25 @@ class ProtocolConverterEngine:
                 prompt_tokens_details["cached_tokens"] = cached_tokens
             chat_usage["prompt_tokens_details"] = prompt_tokens_details
         
-        # Anthropic usage 中的 service_tier 和 inference_geo
-        if usage.get("service_tier"):
-            chat_usage["service_tier"] = usage["service_tier"]
+        # Anthropic usage 中的 service_tier -> Chat service_tier
+        # Anthropic response: "standard"|"priority"|"batch"
+        # Chat response: "auto"|"default"|"flex"|"scale"|"priority"
+        anthropic_service_tier = usage.get("service_tier")
+        if anthropic_service_tier:
+            from .anthropic import AnthropicConverter
+            chat_usage["service_tier"] = AnthropicConverter.RESPONSE_SERVICE_TIER_MAP.get(
+                anthropic_service_tier, anthropic_service_tier
+            )
         if usage.get("inference_geo"):
             chat_usage["inference_geo"] = usage["inference_geo"]
+        
+        # Anthropic server_tool_use -> Chat 无等价字段，保留在 usage 中
+        if usage.get("server_tool_use"):
+            chat_usage["server_tool_use"] = usage["server_tool_use"]
+        
+        # Anthropic cache_creation 详情 (breakdown by TTL)
+        if usage.get("cache_creation"):
+            chat_usage["cache_creation"] = usage["cache_creation"]
         
         # 构建 message
         message = {

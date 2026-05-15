@@ -121,10 +121,19 @@ class AnthropicConverter:
         "none": "none",
     }
     
-    # Anthropic 服务层级映射
+    # Anthropic 请求服务层级映射 (Anthropic request -> Chat)
     SERVICE_TIER_MAP = {
         "auto": "auto",
         "standard_only": "default",
+    }
+    
+    # Anthropic 响应 usage 服务层级映射 (Anthropic response usage -> Chat)
+    # Anthropic response: "standard", "priority", "batch"
+    # Chat response: "auto", "default", "flex", "scale", "priority"
+    RESPONSE_SERVICE_TIER_MAP = {
+        "standard": "default",
+        "priority": "priority",
+        "batch": "default",  # Anthropic batch 无 Chat 等价项，映射为 default
     }
     
     # ================================================================
@@ -697,9 +706,21 @@ class AnthropicConverter:
             if reasoning_tokens:
                 anthropic_usage["output_tokens"] = usage.get("completion_tokens", 0)
         
-        # 提取 service_tier
-        if usage.get("service_tier"):
-            anthropic_usage["service_tier"] = usage["service_tier"]
+        # Chat service_tier -> Anthropic usage.service_tier
+        # Chat: "auto"|"default"|"flex"|"scale"|"priority"
+        # Anthropic: "standard"|"priority"|"batch"
+        chat_service_tier = usage.get("service_tier")
+        if chat_service_tier:
+            chat_to_anthropic_tier = {
+                "default": "standard",
+                "auto": "standard",
+                "flex": "standard",
+                "scale": "standard",
+                "priority": "priority",
+            }
+            anthropic_usage["service_tier"] = chat_to_anthropic_tier.get(
+                chat_service_tier, chat_service_tier
+            )
         
         return {
             "id": response.get("id", f"msg_{uuid.uuid4().hex[:24]}"),
@@ -813,6 +834,16 @@ class AnthropicConverter:
                 "delta": {
                     "type": "thinking_delta",
                     "thinking": reasoning_content
+                }
+            })
+            # Anthropic SDK 要求 thinking 流包含 signature_delta 事件
+            # 用于多轮对话的 thinking 连续性，Chat API 不提供真实 signature
+            events.append({
+                "type": "content_block_delta",
+                "index": cls._stream_state["text_block_index"],
+                "delta": {
+                    "type": "signature_delta",
+                    "signature": ""  # Chat API 不提供 signature
                 }
             })
             return events
@@ -1061,10 +1092,11 @@ class AnthropicConverter:
         if cached_tokens:
             response_usage["input_tokens_details"] = {"cached_tokens": cached_tokens}
         
-        # output_tokens_details
+        # output_tokens_details - Anthropic cache_creation_input_tokens 不直接映射到 reasoning_tokens
+        # 但 Anthropic thinking token 信息可以映射
         cache_creation = usage.get("cache_creation_input_tokens", 0)
-        if cache_creation:
-            response_usage["output_tokens_details"] = {"reasoning_tokens": 0}
+        # Anthropic 没有直接暴露 reasoning_tokens，可以从 output_tokens 和 usage 推断
+        # 保守处理：不设置 reasoning_tokens 除非有明确的来源
         
         result = {
             "id": response.get("id", f"resp_{uuid.uuid4().hex[:24]}"),
