@@ -626,10 +626,12 @@ class AnthropicConverter:
             reasoning_content = message.get("reasoning_content")
             
             # 处理推理内容 -> thinking 块 (必须在文本块之前)
+            # Anthropic SDK: ThinkingBlock 必须包含 thinking + signature 字段
             if reasoning_content:
                 content_blocks.append({
                     "type": "thinking",
                     "thinking": reasoning_content,
+                    "signature": "",  # Chat API 不提供 signature，设为空字符串
                 })
             
             # 处理文本内容
@@ -693,7 +695,7 @@ class AnthropicConverter:
         if isinstance(completion_tokens_details, dict):
             reasoning_tokens = completion_tokens_details.get("reasoning_tokens", 0)
             if reasoning_tokens:
-                anthropic_usage["server_tool_use"] = {}
+                anthropic_usage["output_tokens"] = usage.get("completion_tokens", 0)
         
         # 提取 service_tier
         if usage.get("service_tier"):
@@ -801,7 +803,8 @@ class AnthropicConverter:
                     "index": thinking_idx,
                     "content_block": {
                         "type": "thinking",
-                        "thinking": ""
+                        "thinking": "",
+                        "signature": ""  # Anthropic SDK: ThinkingBlock 必须包含 signature
                     }
                 })
             events.append({
@@ -1040,6 +1043,9 @@ class AnthropicConverter:
         elif stop_reason == "refusal":
             status = "incomplete"
             incomplete_details = {"reason": "content_filter"}
+        elif stop_reason == "pause_turn":
+            status = "incomplete"
+            incomplete_details = {"reason": "max_output_tokens"}
         
         usage = response.get("usage", {})
         

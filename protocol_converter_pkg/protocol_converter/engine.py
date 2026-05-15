@@ -296,11 +296,13 @@ class ProtocolConverterEngine:
                         ])
                 
                 # 处理 reasoning_content -> thinking 块
+                # Anthropic SDK: ThinkingBlock 必须包含 thinking + signature 字段
                 reasoning_content = msg.get("reasoning_content")
                 if reasoning_content:
                     assistant_content.insert(0, {
                         "type": "thinking",
                         "thinking": reasoning_content,
+                        "signature": "",  # Chat API 不提供 signature，设为空字符串
                     })
                 
                 # 转换 tool_calls
@@ -414,8 +416,20 @@ class ProtocolConverterEngine:
             anthropic_request["top_p"] = request["top_p"]
         if request.get("stop"):
             anthropic_request["stop_sequences"] = request["stop"] if isinstance(request["stop"], list) else [request["stop"]]
-        if request.get("metadata"):
-            anthropic_request["metadata"] = request["metadata"]
+        
+        # user 字段 -> Anthropic metadata.user_id
+        user_id = request.get("user")
+        if user_id:
+            if "metadata" not in anthropic_request:
+                anthropic_request["metadata"] = {}
+            anthropic_request["metadata"]["user_id"] = user_id
+        
+        # metadata 合并（请求中的 metadata 可能已有其他字段）
+        req_metadata = request.get("metadata")
+        if req_metadata and isinstance(req_metadata, dict):
+            if "metadata" not in anthropic_request:
+                anthropic_request["metadata"] = {}
+            anthropic_request["metadata"].update(req_metadata)
         
         # 转换 tools
         chat_tools = request.get("tools", [])
@@ -472,6 +486,31 @@ class ProtocolConverterEngine:
         inference_geo = request.get("inference_geo") or self.config.inference_geo
         if inference_geo:
             anthropic_request["inference_geo"] = inference_geo
+        
+        # Chat API 不支持的参数 -> extra_body
+        extra = {}
+        if request.get("parallel_tool_calls") is not None:
+            extra["parallel_tool_calls"] = request["parallel_tool_calls"]
+        if request.get("frequency_penalty") is not None:
+            extra["frequency_penalty"] = request["frequency_penalty"]
+        if request.get("presence_penalty") is not None:
+            extra["presence_penalty"] = request["presence_penalty"]
+        if request.get("seed") is not None:
+            extra["seed"] = request["seed"]
+        if request.get("n") is not None and request["n"] != 1:
+            extra["n"] = request["n"]
+        if request.get("response_format") is not None:
+            extra["response_format"] = request["response_format"]
+        if request.get("logprobs") is not None:
+            extra["logprobs"] = request["logprobs"]
+        if request.get("top_logprobs") is not None:
+            extra["top_logprobs"] = request["top_logprobs"]
+        if request.get("logit_bias") is not None:
+            extra["logit_bias"] = request["logit_bias"]
+        if request.get("web_search_options") is not None:
+            extra["web_search_options"] = request["web_search_options"]
+        if extra:
+            anthropic_request["extra_body"] = extra
         
         return anthropic_request
     
@@ -585,8 +624,18 @@ class ProtocolConverterEngine:
         
         # 缓存 token 信息
         cached_tokens = usage.get("cache_read_input_tokens", 0)
-        if cached_tokens:
-            chat_usage["prompt_tokens_details"] = {"cached_tokens": cached_tokens}
+        cache_creation_tokens = usage.get("cache_creation_input_tokens", 0)
+        if cached_tokens or cache_creation_tokens:
+            prompt_tokens_details = {}
+            if cached_tokens:
+                prompt_tokens_details["cached_tokens"] = cached_tokens
+            chat_usage["prompt_tokens_details"] = prompt_tokens_details
+        
+        # Anthropic usage 中的 service_tier 和 inference_geo
+        if usage.get("service_tier"):
+            chat_usage["service_tier"] = usage["service_tier"]
+        if usage.get("inference_geo"):
+            chat_usage["inference_geo"] = usage["inference_geo"]
         
         # 构建 message
         message = {
@@ -802,9 +851,18 @@ class ProtocolConverterEngine:
             stream=True
         )
         
+        # Anthropic 后端使用独立的 event: 和 data: 行
+        # 需要缓存 event type 直到收到对应的 data
+        pending_event_type = None
+        
         async for line in response.content:
             line = line.decode("utf-8").strip()
             if not line or line.startswith(":"):
+                continue
+            
+            # 处理 event: 行（Anthropic SSE 格式）
+            if line.startswith("event:"):
+                pending_event_type = line[6:].strip()
                 continue
             
             if line.startswith("data:"):
@@ -821,6 +879,13 @@ class ProtocolConverterEngine:
                 
                 try:
                     chunk = json.loads(data_str)
+                    
+                    # 如果是 Anthropic 后端的原始 SSE 数据，需要先转换为 Chat 格式
+                    # Anthropic 后端返回的事件格式与 Chat 不同，需要特殊处理
+                    if backend_format == "anthropic" and pending_event_type:
+                        chunk["_anthropic_event_type"] = pending_event_type
+                    pending_event_type = None
+                    
                     # 使用多事件转换，以支持 Anthropic 的一对多映射
                     stream_chunks = self.convert_stream_chunk_multi(chunk, source_protocol)
                     
@@ -833,6 +898,7 @@ class ProtocolConverterEngine:
                         else:
                             yield sc.to_openai_chunk()
                 except json.JSONDecodeError:
+                    pending_event_type = None
                     continue
 
 

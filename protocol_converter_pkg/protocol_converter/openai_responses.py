@@ -150,12 +150,34 @@ class OpenAIResponsesConverter:
                         messages.append(msg)
         
         # 2. 处理 instructions（相当于 system/developer prompt）
+        # instructions 可以是字符串或 ResponseInputItem 数组
         instructions = request.get("instructions")
         if instructions:
-            messages.insert(0, {
-                "role": "developer",
-                "content": instructions if isinstance(instructions, str) else ""
-            })
+            if isinstance(instructions, str):
+                messages.insert(0, {
+                    "role": "developer",
+                    "content": instructions
+                })
+            elif isinstance(instructions, list):
+                # instructions 为数组时，逐项转换
+                for inst_item in reversed(instructions):
+                    if isinstance(inst_item, dict):
+                        inst_type = inst_item.get("type", "")
+                        if inst_type == "message":
+                            role = inst_item.get("role", "developer")
+                            content = inst_item.get("content", "")
+                            if isinstance(content, list):
+                                converted = cls._convert_content_to_chat(content)
+                                messages.insert(0, {"role": role, "content": converted})
+                            else:
+                                messages.insert(0, {"role": role, "content": str(content)})
+                        elif inst_type == "input_text" or "text" in inst_item:
+                            messages.insert(0, {
+                                "role": "developer",
+                                "content": inst_item.get("text", "")
+                            })
+                    elif isinstance(inst_item, str):
+                        messages.insert(0, {"role": "developer", "content": inst_item})
         
         # 3. 转换 tools
         tools = cls._convert_tools(request.get("tools", []))
@@ -165,6 +187,18 @@ class OpenAIResponsesConverter:
             "model": request.get("model", "gpt-4o"),
             "messages": messages,
         }
+        
+        # 4.5 从 Responses 的 web_search / web_search_preview 工具中提取配置
+        # Chat API 的 web_search_options 是顶层请求参数，不是工具定义的一部分
+        for tool in request.get("tools", []):
+            if isinstance(tool, dict) and tool.get("type") in ("web_search", "web_search_preview"):
+                ws_opts = tool.get("user_location", {})
+                search_context_size = tool.get("search_context_size", "medium")
+                chat_request["web_search_options"] = {
+                    "search_context_size": search_context_size,
+                    **({"user_location": ws_opts} if ws_opts else {})
+                }
+                break
         
         # 5. 映射可选参数
         if request.get("stream") is not None:
@@ -443,7 +477,7 @@ class OpenAIResponsesConverter:
         - namespace: 命名空间工具
         - tool_search: 工具搜索
         
-        Chat 工具类型: function, web_search (web_search_options)
+        Chat 工具类型: function, web_search_preview
         """
         converted = []
         for tool in tools:
@@ -465,28 +499,11 @@ class OpenAIResponsesConverter:
                     "function": func_def
                 })
             
-            elif tool_type == "web_search":
-                # Chat API 支持 web_search_options
-                ws_opts = tool.get("user_location", {})
-                search_context_size = tool.get("search_context_size", "medium")
+            elif tool_type in ("web_search", "web_search_preview"):
+                # Chat API 支持 web_search_preview 工具类型
+                # 搜索上下文配置通过顶层 web_search_options 参数传递（在 to_openai_chat 中处理）
                 converted.append({
-                    "type": "web_search",
-                    "web_search_options": {
-                        "search_context_size": search_context_size,
-                        **({"user_location": ws_opts} if ws_opts else {})
-                    }
-                })
-            
-            elif tool_type == "web_search_preview":
-                # 预览版网页搜索
-                ws_opts = tool.get("user_location", {})
-                search_context_size = tool.get("search_context_size", "medium")
-                converted.append({
-                    "type": "web_search",
-                    "web_search_options": {
-                        "search_context_size": search_context_size,
-                        **({"user_location": ws_opts} if ws_opts else {})
-                    }
+                    "type": "web_search_preview"
                 })
             
             elif tool_type == "file_search":
@@ -528,6 +545,14 @@ class OpenAIResponsesConverter:
             
             elif tool_type == "apply_patch":
                 # 补丁工具 - Chat API 不直接支持
+                pass
+            
+            elif tool_type == "namespace":
+                # 命名空间工具 - Chat API 不直接支持
+                pass
+            
+            elif tool_type == "tool_search":
+                # 工具搜索 - Chat API 不直接支持
                 pass
         
         return converted
@@ -1088,6 +1113,21 @@ class OpenAIResponsesConverter:
                         "arguments": item.get("arguments", "{}")
                     }
                 })
+            
+            elif item_type == "tool_search_call":
+                # 工具搜索调用 - 转为工具调用
+                tool_calls.append({
+                    "id": item.get("id", f"call_{uuid.uuid4().hex[:24]}"),
+                    "type": "function",
+                    "function": {
+                        "name": "tool_search",
+                        "arguments": item.get("arguments", "{}")
+                    }
+                })
+            
+            elif item_type == "compaction_item":
+                # 压缩项 - Chat API 无等价项，跳过
+                pass
         
         # 映射状态
         status = response.get("status", "completed")
