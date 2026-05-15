@@ -391,22 +391,21 @@ class AnthropicConverter:
                     if source.get("type") == "base64":
                         media_type = source.get("media_type", "application/pdf")
                         data = source.get("data", "")
-                        # OpenAI Chat API 支持 file 类型的内容块
+                        # Chat file part 仅支持 file_data/file_id/filename；不支持 mime_type。
+                        file_obj = {
+                            "file_data": f"data:{media_type};base64,{data}"
+                        }
+                        if block.get("title"):
+                            file_obj["filename"] = block["title"]
                         content_parts.append({
                             "type": "file",
-                            "file": {
-                                "mime_type": media_type,
-                                "file_data": f"data:{media_type};base64,{data}"
-                            }
+                            "file": file_obj
                         })
                     elif source.get("type") == "url":
-                        content_parts.append({
-                            "type": "file",
-                            "file": {
-                                "mime_type": source.get("media_type", "application/pdf"),
-                                "file_data": source.get("url", "")
-                            }
-                        })
+                        # Chat Completions 不支持 file_url，降级为文本引用。
+                        file_url_text = f"[File URL: {source.get('url', '')}]"
+                        text_parts.append(file_url_text)
+                        content_parts.append({"type": "text", "text": file_url_text})
                     elif source.get("type") == "text":
                         text_parts.append(source.get("text", ""))
                         content_parts.append({"type": "text", "text": source.get("text", "")})

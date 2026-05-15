@@ -133,16 +133,9 @@ class OpenAIChatConverter:
         
         自动检测输入协议并转换
         """
-        model = request.get("model", "")
-        has_max_tokens = "max_tokens" in request
-        has_messages = "messages" in request
-        has_anthropic_marker = (
-            "tools" in request or 
-            "system" in request or 
-            model.startswith("claude-")
-        )
-        
-        if has_max_tokens and has_messages and has_anthropic_marker:
+        from .protocol_detector import ProtocolDetector, Protocol
+
+        if ProtocolDetector.detect(request) == Protocol.ANTHROPIC:
             return cls._from_anthropic(request)
         
         return cls._normalize_request(request)

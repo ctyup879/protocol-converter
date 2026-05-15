@@ -337,7 +337,7 @@ class OpenAIResponsesConverter:
             return {
                 "role": "tool",
                 "tool_call_id": item.get("call_id", ""),
-                "content": str(item.get("output", ""))
+                "content": cls._convert_tool_output_to_chat_content(item.get("output", ""))
             }
         
         elif item_type == "function_call":
@@ -390,6 +390,40 @@ class OpenAIResponsesConverter:
             return {"role": role, "content": str(item.get("content", ""))}
         
         return None
+
+    @classmethod
+    def _convert_tool_output_to_chat_content(cls, output: Any) -> str:
+        """转换 Responses 工具输出为 Chat tool 消息支持的文本内容"""
+        if isinstance(output, str):
+            return output
+        if not isinstance(output, list):
+            return str(output)
+
+        text_parts = []
+        for item in output:
+            if not isinstance(item, dict):
+                text_parts.append(str(item))
+                continue
+
+            item_type = item.get("type", "")
+            if item_type in ("input_text", "output_text", "text"):
+                text_parts.append(item.get("text", ""))
+            elif item_type in ("input_image", "image"):
+                image_ref = item.get("image_url") or item.get("file_id") or ""
+                text_parts.append(f"[Image: {image_ref}]")
+            elif item_type in ("input_file", "file"):
+                file_ref = (
+                    item.get("filename")
+                    or item.get("file_id")
+                    or item.get("file_url")
+                    or "[inline file]"
+                )
+                text_parts.append(f"[File: {file_ref}]")
+            else:
+                text = item.get("text") or item.get("content")
+                text_parts.append(str(text) if text is not None else str(item))
+
+        return "\n".join(part for part in text_parts if part is not None)
     
     @classmethod
     def _convert_content_to_chat(cls, content: Union[str, List[Dict]]) -> Union[str, List[Dict]]:
@@ -438,16 +472,30 @@ class OpenAIResponsesConverter:
             
             elif item_type == "input_file":
                 has_multimodal = True
-                file_data = item.get("file_data", item.get("file_url", ""))
+                file_data = item.get("file_data", "")
+                file_id = item.get("file_id")
+                file_url = item.get("file_url", "")
                 filename = item.get("filename", "")
-                if file_data:
+                if file_id:
+                    file_obj = {"file_id": file_id}
+                    if filename:
+                        file_obj["filename"] = filename
                     content_parts.append({
                         "type": "file",
-                        "file": {
-                            "mime_type": item.get("mime_type", "application/octet-stream"),
-                            "file_data": file_data
-                        }
+                        "file": file_obj
                     })
+                elif file_data:
+                    file_obj = {"file_data": file_data}
+                    if filename:
+                        file_obj["filename"] = filename
+                    content_parts.append({
+                        "type": "file",
+                        "file": file_obj
+                    })
+                elif file_url:
+                    file_text = f"[File URL: {file_url}]"
+                    text_parts.append(file_text)
+                    content_parts.append({"type": "text", "text": file_text})
                 elif filename:
                     text_parts.append(f"[File: {filename}]")
             
@@ -601,6 +649,19 @@ class OpenAIResponsesConverter:
                     "type": "function",
                     "function": {"name": tool_choice.get("name", "")}
                 }
+
+            elif tc_type == "allowed_tools":
+                return {
+                    "type": "allowed_tools",
+                    "allowed_tools": {
+                        "mode": tool_choice.get("mode", "auto"),
+                        "tools": [
+                            cls._convert_allowed_tool_to_chat(tool)
+                            for tool in tool_choice.get("tools", [])
+                            if isinstance(tool, dict)
+                        ],
+                    },
+                }
             
             elif tc_type in ("mcp", "custom", "apply_patch", "shell", "allowed", "types"):
                 # 非 Chat 原生支持的 tool_choice 类型
@@ -614,6 +675,16 @@ class OpenAIResponsesConverter:
                 return "auto"
         
         return tool_choice
+
+    @classmethod
+    def _convert_allowed_tool_to_chat(cls, tool: Dict[str, Any]) -> Dict[str, Any]:
+        """转换 Responses allowed_tools 中的工具引用为 Chat allowed_tools 形状"""
+        if tool.get("type") == "function" and "function" not in tool:
+            return {
+                "type": "function",
+                "function": {"name": tool.get("name", "")}
+            }
+        return tool
     
     # ================================================================
     # 请求转换：Chat -> Responses
@@ -849,14 +920,13 @@ class OpenAIResponsesConverter:
                     result.append({"type": "input_image", "image_url": str(url)})
             elif item_type == "file":
                 file_data = item.get("file", {})
-                input_file = {
-                    "type": "input_file",
-                    "file_data": file_data.get("file_data", ""),
-                    "filename": file_data.get("filename", "")
-                }
-                # 保留 mime_type（Responses API 支持）
-                if file_data.get("mime_type"):
-                    input_file["mime_type"] = file_data["mime_type"]
+                input_file = {"type": "input_file"}
+                if file_data.get("file_data"):
+                    input_file["file_data"] = file_data["file_data"]
+                if file_data.get("file_id"):
+                    input_file["file_id"] = file_data["file_id"]
+                if file_data.get("filename"):
+                    input_file["filename"] = file_data["filename"]
                 result.append(input_file)
             else:
                 text = item.get("text", "")
@@ -909,8 +979,29 @@ class OpenAIResponsesConverter:
             if tc_type == "function":
                 func = tool_choice.get("function", {})
                 return {"type": "function", "name": func.get("name", "")}
+            if tc_type == "allowed_tools":
+                allowed_tools = tool_choice.get("allowed_tools", {})
+                return {
+                    "type": "allowed_tools",
+                    "mode": allowed_tools.get("mode", "auto"),
+                    "tools": [
+                        cls._convert_allowed_tool_to_responses(tool)
+                        for tool in allowed_tools.get("tools", [])
+                        if isinstance(tool, dict)
+                    ],
+                }
         
         return tool_choice
+
+    @classmethod
+    def _convert_allowed_tool_to_responses(cls, tool: Dict[str, Any]) -> Dict[str, Any]:
+        """转换 Chat allowed_tools 中的工具引用为 Responses allowed_tools 形状"""
+        if tool.get("type") == "function" and isinstance(tool.get("function"), dict):
+            return {
+                "type": "function",
+                "name": tool["function"].get("name", "")
+            }
+        return tool
     
     # ================================================================
     # 响应转换：Chat Response -> Responses Response
@@ -962,7 +1053,7 @@ class OpenAIResponsesConverter:
                 })
             
             # 处理文本内容
-            if content:
+            if content is not None:
                 msg_content = []
                 output_text_item = {
                     "type": "output_text",
@@ -981,9 +1072,21 @@ class OpenAIResponsesConverter:
                     "role": "assistant",
                     "content": msg_content
                 })
-            
-            # 处理 refusal
+
+            # 处理 refusal 内容
             refusal = message.get("refusal")
+            if refusal:
+                output.append({
+                    "type": "message",
+                    "id": f"msg_{uuid.uuid4().hex[:24]}",
+                    "status": "incomplete",
+                    "role": "assistant",
+                    "content": [{
+                        "type": "refusal",
+                        "refusal": refusal,
+                    }]
+                })
+            
             if refusal:
                 status = "incomplete"
                 incomplete_details = {"reason": "content_filter"}
@@ -1065,6 +1168,7 @@ class OpenAIResponsesConverter:
         output = response.get("output", [])
         message_content = None
         message_annotations = None
+        message_refusal = None
         tool_calls = []
         reasoning_content = None
         
@@ -1086,6 +1190,8 @@ class OpenAIResponsesConverter:
                         # 保留 annotations
                         if c.get("annotations"):
                             all_annotations.extend(c["annotations"])
+                    elif c_type == "refusal":
+                        message_refusal = c.get("refusal", "")
                 if texts:
                     message_content = "\n".join(texts)
                 if all_annotations:
@@ -1258,6 +1364,8 @@ class OpenAIResponsesConverter:
         }
         if reasoning_content is not None:
             message["reasoning_content"] = reasoning_content
+        if message_refusal is not None:
+            message["refusal"] = message_refusal
         if tool_calls:
             message["tool_calls"] = tool_calls
         # 保留 annotations（Responses output_text.annotations -> Chat message.annotations）
@@ -1376,6 +1484,13 @@ class OpenAIResponsesConverter:
                         if c.get("annotations"):
                             text_block["citations"] = c["annotations"]
                         content_blocks.append(text_block)
+                    elif c_type == "refusal":
+                        refusal_text = c.get("refusal", "")
+                        if refusal_text:
+                            content_blocks.append({
+                                "type": "text",
+                                "text": refusal_text
+                            })
             
             elif item_type == "function_call":
                 args_str = item.get("arguments", "{}")

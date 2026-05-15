@@ -4005,3 +4005,253 @@ class TestResponsesReasoningSummaryField:
         reasoning_items = [item for item in result["output"] if item.get("type") == "reasoning"]
         assert len(reasoning_items) == 1
         assert "summary" in reasoning_items[0]
+
+
+class TestSDKCompatibilityGaps:
+    """测试基于官方文档和 Python SDK 发现的兼容性缺口"""
+
+    def test_anthropic_document_to_chat_file_uses_sdk_fields_only(self):
+        """Anthropic document -> Chat file 不应输出 SDK 不支持的 mime_type 字段"""
+        msg = {
+            "role": "user",
+            "content": [
+                {
+                    "type": "document",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "application/pdf",
+                        "data": "JVBERi0=",
+                    },
+                }
+            ],
+        }
+
+        result = AnthropicConverter._convert_message(msg)
+
+        file_obj = result[0]["content"][0]["file"]
+        assert file_obj["file_data"] == "data:application/pdf;base64,JVBERi0="
+        assert "mime_type" not in file_obj
+
+    def test_responses_input_file_url_degrades_for_chat(self):
+        """Chat Completions 不支持 file_url，Responses file_url 应降级为文本而不是伪装成 file_data"""
+        request = {
+            "model": "gpt-4o",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "Summarize this"},
+                        {"type": "input_file", "file_url": "https://example.com/report.pdf"},
+                    ],
+                }
+            ],
+        }
+
+        result = OpenAIResponsesConverter.to_openai_chat(request)
+
+        content = result["messages"][0]["content"]
+        assert content[1] == {
+            "type": "text",
+            "text": "[File URL: https://example.com/report.pdf]",
+        }
+
+    def test_responses_input_file_id_maps_to_chat_file_id(self):
+        """Responses input_file.file_id 可映射到 Chat file.file_id"""
+        request = {
+            "model": "gpt-4o",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_file", "file_id": "file_123"}],
+                }
+            ],
+        }
+
+        result = OpenAIResponsesConverter.to_openai_chat(request)
+
+        assert result["messages"][0]["content"][0] == {
+            "type": "file",
+            "file": {"file_id": "file_123"},
+        }
+
+    def test_responses_function_call_output_content_list_to_chat_tool_text(self):
+        """Responses function_call_output.output 数组应提取文本，而不是变成 Python repr"""
+        request = {
+            "model": "gpt-4o",
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_123",
+                    "output": [
+                        {"type": "input_text", "text": "line 1"},
+                        {"type": "input_text", "text": "line 2"},
+                    ],
+                }
+            ],
+        }
+
+        result = OpenAIResponsesConverter.to_openai_chat(request)
+
+        assert result["messages"][0]["content"] == "line 1\nline 2"
+
+    def test_chat_refusal_to_responses_refusal_content(self):
+        """Chat message.refusal 应映射为 Responses refusal 内容块"""
+        chat_response = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [
+                {
+                    "message": {"content": None, "refusal": "I cannot help with that."},
+                    "finish_reason": "content_filter",
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
+        }
+
+        result = OpenAIResponsesConverter.from_openai_chat(chat_response)
+
+        msg = result["output"][0]
+        assert msg["content"][0] == {
+            "type": "refusal",
+            "refusal": "I cannot help with that.",
+        }
+        assert result["status"] == "incomplete"
+        assert result["incomplete_details"] == {"reason": "content_filter"}
+
+    def test_responses_refusal_to_chat_refusal(self):
+        """Responses refusal 内容块应映射为 Chat message.refusal"""
+        responses_response = {
+            "id": "resp_123",
+            "object": "response",
+            "status": "incomplete",
+            "incomplete_details": {"reason": "content_filter"},
+            "model": "gpt-4o",
+            "output": [
+                {
+                    "type": "message",
+                    "id": "msg_123",
+                    "role": "assistant",
+                    "status": "incomplete",
+                    "content": [{"type": "refusal", "refusal": "I cannot help with that."}],
+                }
+            ],
+            "usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
+        }
+
+        result = OpenAIResponsesConverter.to_chat_response(responses_response)
+
+        message = result["choices"][0]["message"]
+        assert message["content"] is None
+        assert message["refusal"] == "I cannot help with that."
+        assert result["choices"][0]["finish_reason"] == "content_filter"
+
+    def test_chat_multiple_system_and_developer_messages_are_preserved_for_anthropic(self):
+        """Chat 多条 system/developer 消息转 Anthropic 时应合并，而不是只保留最后一条"""
+        engine = ProtocolConverterEngine(ConverterConfig(backend_type="anthropic"))
+        request = {
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "system", "content": "System A"},
+                {"role": "developer", "content": "Developer B"},
+                {"role": "user", "content": "Hello"},
+            ],
+        }
+
+        result = engine._chat_to_anthropic_request(request)
+
+        assert result["system"] == "System A\n\nDeveloper B"
+
+    def test_openai_chat_tools_with_max_tokens_are_not_misdetected_as_anthropic(self):
+        """合法 Chat tools + max_tokens 请求不应被 OpenAIChatConverter 误判为 Anthropic"""
+        request = {
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Weather?"}],
+            "max_tokens": 128,
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ],
+        }
+
+        result = OpenAIChatConverter.to_openai_chat(request)
+
+        assert result.max_tokens == 128
+        assert result.max_completion_tokens is None
+        assert result.tools == request["tools"]
+
+    def test_responses_allowed_tools_choice_maps_to_chat_sdk_shape(self):
+        """Responses allowed_tools tool_choice 应转换为 Chat SDK 的 allowed_tools 包装形状"""
+        request = {
+            "model": "gpt-4o",
+            "input": "Hi",
+            "tool_choice": {
+                "type": "allowed_tools",
+                "mode": "required",
+                "tools": [{"type": "function", "name": "get_weather"}],
+            },
+        }
+
+        result = OpenAIResponsesConverter.to_openai_chat(request)
+
+        assert result["tool_choice"] == {
+            "type": "allowed_tools",
+            "allowed_tools": {
+                "mode": "required",
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {"name": "get_weather"},
+                    }
+                ],
+            },
+        }
+
+    def test_chat_allowed_tools_choice_maps_to_responses_sdk_shape(self):
+        """Chat allowed_tools tool_choice 应转换为 Responses SDK 的平铺形状"""
+        request = {
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "tool_choice": {
+                "type": "allowed_tools",
+                "allowed_tools": {
+                    "mode": "auto",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "function": {"name": "get_weather"},
+                        }
+                    ],
+                },
+            },
+        }
+
+        result = OpenAIResponsesConverter.from_openai_chat_request(request)
+
+        assert result["tool_choice"] == {
+            "type": "allowed_tools",
+            "mode": "auto",
+            "tools": [{"type": "function", "name": "get_weather"}],
+        }
+
+    def test_engine_developer_downgrade_does_not_mutate_input_request(self):
+        """Chat 后端 developer 降级为 system 时不应修改原始请求对象"""
+        engine = ProtocolConverterEngine(ConverterConfig(backend_type="openai"))
+        request = {
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "developer", "content": "Follow policy."},
+                {"role": "user", "content": "Hi"},
+            ],
+        }
+
+        result = engine.convert_request(request)
+
+        assert result["messages"][0]["role"] == "system"
+        assert request["messages"][0]["role"] == "developer"

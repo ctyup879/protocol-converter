@@ -3,6 +3,7 @@
 """
 
 import json
+import copy
 import time
 import uuid
 from typing import Any, Dict, List, Optional, Union, Iterator, Callable
@@ -188,7 +189,7 @@ class ProtocolConverterEngine:
                 result = self.openai_responses.to_openai_chat(request)
             else:
                 # 已经是 OpenAI Chat 或未知
-                result = request.copy() if isinstance(request, dict) else request
+                result = copy.deepcopy(request) if isinstance(request, dict) else request
         
         elif target_format == "anthropic":
             # 转换为 Anthropic 格式
@@ -199,7 +200,7 @@ class ProtocolConverterEngine:
                 chat_req = self.openai_responses.to_openai_chat(request)
                 result = self._chat_to_anthropic_request(chat_req)
             else:
-                result = request.copy() if isinstance(request, dict) else request
+                result = copy.deepcopy(request) if isinstance(request, dict) else request
         
         elif target_format == "openai_responses":
             # 转换为 OpenAI Responses 格式
@@ -210,7 +211,7 @@ class ProtocolConverterEngine:
                 chat_req = self.anthropic.to_openai_chat(request)
                 result = self.openai_responses.from_openai_chat_request(chat_req)
             else:
-                result = request.copy() if isinstance(request, dict) else request
+                result = copy.deepcopy(request) if isinstance(request, dict) else request
         
         else:
             result = request
@@ -254,7 +255,7 @@ class ProtocolConverterEngine:
         """将 OpenAI Chat 请求转换为 Anthropic 格式"""
         messages = request.get("messages", [])
         anthropic_messages = []
-        system_prompt = None
+        system_parts = []
         
         for msg in messages:
             role = msg.get("role", "user")
@@ -263,13 +264,15 @@ class ProtocolConverterEngine:
             if role == "system" or role == "developer":
                 # system / developer 消息提取为顶级 system 参数
                 if isinstance(content, str):
-                    system_prompt = content
+                    if content:
+                        system_parts.append(content)
                 elif isinstance(content, list):
                     text_parts = []
                     for block in content:
                         if isinstance(block, dict) and block.get("type") == "text":
                             text_parts.append(block.get("text", ""))
-                    system_prompt = "\n".join(text_parts) if text_parts else None
+                    if text_parts:
+                        system_parts.append("\n".join(text_parts))
                 continue
             
             if role == "tool":
@@ -415,6 +418,7 @@ class ProtocolConverterEngine:
             "messages": anthropic_messages,
         }
         
+        system_prompt = "\n\n".join(system_parts) if system_parts else None
         if system_prompt:
             anthropic_request["system"] = system_prompt
         if request.get("stream") is not None:
