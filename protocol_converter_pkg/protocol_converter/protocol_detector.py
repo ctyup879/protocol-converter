@@ -1,5 +1,10 @@
 """
 协议检测器 - 自动检测请求使用的协议类型
+
+检测依据:
+- Anthropic Messages API: 有 max_tokens + messages + (claude- 模型 或 system 顶级参数 或 stop_sequences/thinking/cache_control)
+- OpenAI Responses API: 有 input 参数 或 instructions/max_output_tokens/previous_response_id/reasoning/truncation/prompt/text 等特有参数
+- OpenAI Chat Completions API: 有 messages 参数
 """
 
 from enum import Enum
@@ -24,11 +29,23 @@ class ProtocolDetector:
     # OpenAI Responses API 特征
     OPENAI_RESPONSES_KEYS = {"model", "input", "max_output_tokens"}
     OPENAI_RESPONSES_INPUT_TYPES = {"message", "text", "image"}
+    # Responses API 特有参数（Chat API 不存在这些参数）
+    OPENAI_RESPONSES_SPECIFIC_KEYS = {
+        "previous_response_id", "reasoning", "text", "truncation",
+        "background", "max_tool_calls", "context_management",
+        "conversation", "include", "prompt",
+    }
     
     # Anthropic Messages API 特征
     ANTHROPIC_KEYS = {"messages", "model", "max_tokens"}
     ANTHROPIC_ROLES = {"user", "assistant"}
-    ANTHROPIC_CONTENT_TYPES = {"text", "tool_use", "tool_result"}
+    ANTHROPIC_CONTENT_TYPES = {"text", "tool_use", "tool_result", "thinking", "redacted_thinking", 
+                               "image", "document", "search_result", "server_tool_use"}
+    # Anthropic 特有参数
+    ANTHROPIC_SPECIFIC_KEYS = {
+        "stop_sequences", "thinking", "cache_control", "top_k",
+        "container", "output_config",
+    }
     
     @classmethod
     def detect(cls, request: Dict[str, Any]) -> Protocol:
@@ -63,7 +80,7 @@ class ProtocolDetector:
     @classmethod
     def _is_anthropic(cls, request: Dict[str, Any], keys: set) -> bool:
         """检查是否为 Anthropic Messages API"""
-        # Anthropic 必须有 max_tokens（不是 max_tokens）
+        # Anthropic 必须有 max_tokens（注意：这是 Anthropic 的必填参数）
         if "max_tokens" not in keys:
             return False
         
@@ -90,13 +107,19 @@ class ProtocolDetector:
         if model.startswith("claude-"):
             return True
         
-        # Anthropic 特有参数：stop_sequences, thinking, cache_control
-        anthropic_specific_params = {"stop_sequences", "thinking", "cache_control"}
-        if any(p in keys for p in anthropic_specific_params):
+        # Anthropic 特有参数
+        if any(p in keys for p in cls.ANTHROPIC_SPECIFIC_KEYS):
             return True
         
         # Anthropic 有 system 作为顶级参数
         if "system" in keys:
+            return True
+        
+        # Anthropic 的 tool_choice 支持 "any"（Chat API 不支持）
+        tool_choice = request.get("tool_choice")
+        if tool_choice == "any":
+            return True
+        if isinstance(tool_choice, dict) and tool_choice.get("type") == "tool":
             return True
         
         return False
@@ -116,13 +139,33 @@ class ProtocolDetector:
                 if isinstance(first_item, dict) and first_item.get("type") in cls.OPENAI_RESPONSES_INPUT_TYPES:
                     return True
         
-        # 有 instructions 或 max_output_tokens 强烈暗示 Responses API
+        # Responses API 特有参数检测
+        # 有 instructions 且无 messages -> 可能是 Responses
         if "instructions" in keys and "messages" not in keys:
             return True
+        # max_output_tokens 是 Responses 特有参数名
         if "max_output_tokens" in keys and "messages" not in keys:
             return True
         # previous_response_id 是 Responses API 特有
         if "previous_response_id" in keys:
+            return True
+        # reasoning 参数是 Responses 特有（Chat 用 reasoning_effort）
+        if "reasoning" in keys and "messages" not in keys:
+            return True
+        # text 配置是 Responses 特有（Chat 用 response_format）
+        if "text" in keys and "messages" not in keys:
+            return True
+        # truncation 是 Responses 特有
+        if "truncation" in keys:
+            return True
+        # background 是 Responses 特有
+        if "background" in keys:
+            return True
+        # max_tool_calls 是 Responses 特有
+        if "max_tool_calls" in keys:
+            return True
+        # 其他 Responses 特有参数
+        if any(p in keys for p in cls.OPENAI_RESPONSES_SPECIFIC_KEYS):
             return True
         
         return False

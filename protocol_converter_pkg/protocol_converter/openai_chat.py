@@ -3,6 +3,40 @@ OpenAI Chat Completions 协议转换器
 
 参考: https://platform.openai.com/docs/api-reference/chat
 参考 SDK: openai-python CompletionCreateParams
+
+OpenAI Chat Completions API 请求参数:
+- model (必填): 模型名称
+- messages (必填): 消息列表
+- temperature: 温度 (0-2)
+- top_p: nucleus 采样
+- n: 生成选择数量
+- stream: 是否流式
+- stream_options: 流式选项 {"include_usage": true}
+- max_tokens: 最大 token 数 (已弃用，推荐 max_completion_tokens)
+- max_completion_tokens: 最大完成 token 数
+- tools: 工具定义
+- tool_choice: 工具选择策略
+- response_format: 响应格式 (text | json_object | json_schema)
+- seed: 随机种子
+- stop: 停止序列
+- presence_penalty: 存在惩罚 (-2.0 ~ 2.0)
+- frequency_penalty: 频率惩罚 (-2.0 ~ 2.0)
+- logit_bias: token 偏置
+- logprobs: 是否返回 logprobs
+- top_logprobs: 返回的 top logprobs 数量 (0-20)
+- user: 用户标识符
+- store: 是否存储
+- reasoning_effort: 推理努力 (none, minimal, low, medium, high, xhigh)
+- parallel_tool_calls: 是否允许并行工具调用
+- web_search_options: 网页搜索选项
+- service_tier: 服务层级 (auto, default, flex, scale, priority)
+- metadata: 元数据 (最多16个键值对)
+- modalities: 输出类型 (text, audio)
+- audio: 音频输出参数
+- prediction: 预测内容
+- verbosity: 输出详细程度 (low, medium, high)
+- safety_identifier: 安全标识符
+- prompt_cache_key: 缓存键
 """
 
 import json
@@ -39,6 +73,14 @@ class ChatCompletionRequest:
     parallel_tool_calls: Optional[bool] = None
     web_search_options: Optional[Dict] = None
     service_tier: Optional[str] = None
+    metadata: Optional[Dict[str, str]] = None
+    modalities: Optional[List[str]] = None
+    audio: Optional[Dict] = None
+    prediction: Optional[Dict] = None
+    stream_options: Optional[Dict] = None
+    verbosity: Optional[str] = None
+    safety_identifier: Optional[str] = None
+    prompt_cache_key: Optional[str] = None
 
 
 @dataclass
@@ -52,6 +94,7 @@ class ChatCompletionResponse:
     usage: Optional[Dict[str, Any]] = None
     service_tier: Optional[str] = None
     system_fingerprint: Optional[str] = None
+    metadata: Optional[Dict[str, str]] = None
 
 
 class OpenAIChatConverter:
@@ -127,6 +170,14 @@ class OpenAIChatConverter:
             parallel_tool_calls=request.get("parallel_tool_calls"),
             web_search_options=request.get("web_search_options"),
             service_tier=request.get("service_tier"),
+            metadata=request.get("metadata"),
+            modalities=request.get("modalities"),
+            audio=request.get("audio"),
+            prediction=request.get("prediction"),
+            stream_options=request.get("stream_options"),
+            verbosity=request.get("verbosity"),
+            safety_identifier=request.get("safety_identifier"),
+            prompt_cache_key=request.get("prompt_cache_key"),
         )
     
     @classmethod

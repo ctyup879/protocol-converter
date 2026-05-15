@@ -3,6 +3,62 @@ Anthropic Messages API 协议转换器
 
 参考: https://docs.anthropic.com/en/api/messages
 参考 SDK: anthropic-sdk-python
+
+Anthropic Messages API 请求参数:
+- model (必填): 模型名称
+- max_tokens (必填): 最大生成 token 数
+- messages (必填): 消息列表
+- system: 系统提示词 (str | TextBlockParam[])
+- tools: 工具定义 (ToolUnionParam[])
+- tool_choice: 工具选择策略
+- temperature: 温度 (0.0-1.0, 默认 1.0)
+- top_p: nucleus 采样
+- top_k: Top-K 采样
+- stop_sequences: 停止序列
+- stream: 是否流式
+- thinking: 扩展思考配置
+- metadata: 元数据 {"user_id": "..."}
+- cache_control: 缓存控制
+- service_tier: 服务层级 ("auto" | "standard_only")
+- container: 容器标识
+- output_config: 输出配置
+
+Anthropic 消息内容块类型:
+- text: 文本
+- image: 图片 (source: base64 | url)
+- document: 文档 (PDF等)
+- tool_use: 工具调用
+- tool_result: 工具结果
+- thinking: 扩展思考
+- redacted_thinking: 脱敏思考
+- server_tool_use: 服务器工具调用
+- web_search_tool_result: 网页搜索结果
+- web_fetch_tool_result: 网页获取结果
+- code_execution_tool_result: 代码执行结果
+- search_result: 搜索结果
+
+Anthropic 流式事件类型:
+- message_start: 消息开始 (包含完整 message 对象)
+- content_block_start: 内容块开始
+- content_block_delta: 内容增量 (text_delta | input_json_delta | thinking_delta | citations_delta | signature_delta)
+- content_block_stop: 内容块结束
+- message_delta: 消息级增量 (stop_reason, stop_sequence, usage)
+- message_stop: 消息结束
+- ping: 心跳
+- error: 错误
+
+Anthropic 响应字段:
+- id, type, role, content, model, stop_reason, stop_sequence, stop_details, usage
+- usage: input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens,
+         server_tool_use, service_tier, cache_creation, inference_geo
+
+Anthropic 停止原因:
+- end_turn: 自然停止
+- max_tokens: 达到最大 token 数
+- stop_sequence: 遇到自定义停止序列
+- tool_use: 工具调用
+- pause_turn: 暂停长运行
+- refusal: 流式分类器介入
 """
 
 import json
@@ -48,6 +104,12 @@ class AnthropicConverter:
         "none": "none",
     }
     
+    # Anthropic 服务层级映射
+    SERVICE_TIER_MAP = {
+        "auto": "auto",
+        "standard_only": "default",
+    }
+    
     # ================================================================
     # 请求转换：Anthropic -> OpenAI Chat
     # ================================================================
@@ -59,9 +121,6 @@ class AnthropicConverter:
         
         Args:
             request: Anthropic Messages 格式请求
-            {"model", "max_tokens", "messages", "system", "tools", 
-             "tool_choice", "temperature", "top_p", "top_k", 
-             "stop_sequences", "stream", "thinking", "metadata"}
             
         Returns:
             Dict: OpenAI Chat 格式请求
@@ -74,12 +133,13 @@ class AnthropicConverter:
             if isinstance(system_prompt, str):
                 messages.append({"role": "system", "content": system_prompt})
             elif isinstance(system_prompt, list):
-                text_parts = []
-                for block in system_prompt:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        text_parts.append(block.get("text", ""))
-                if text_parts:
-                    messages.append({"role": "system", "content": "\n".join(text_parts)})
+                system_content = cls._convert_system_blocks(system_prompt)
+                if system_content:
+                    if isinstance(system_content, str):
+                        messages.append({"role": "system", "content": system_content})
+                    else:
+                        # 复杂内容块（含图片等）
+                        messages.append({"role": "system", "content": system_content})
         
         # 2. 处理 messages
         anthropic_messages = request.get("messages", [])
@@ -107,8 +167,8 @@ class AnthropicConverter:
         if request.get("top_p") is not None:
             chat_request["top_p"] = request["top_p"]
         if request.get("max_tokens") is not None:
-            # Anthropic max_tokens -> OpenAI max_tokens (注意: OpenAI 新版推荐 max_completion_tokens)
-            chat_request["max_tokens"] = request["max_tokens"]
+            # Anthropic max_tokens -> OpenAI max_completion_tokens (推荐) / max_tokens (兼容)
+            chat_request["max_completion_tokens"] = request["max_tokens"]
         if tools:
             chat_request["tools"] = tools
         if tool_choice is not None:
@@ -116,18 +176,72 @@ class AnthropicConverter:
         if request.get("stop_sequences"):
             chat_request["stop"] = request["stop_sequences"]
         if request.get("metadata"):
-            chat_request["user"] = request["metadata"].get("user_id", "")
+            user_id = request["metadata"].get("user_id")
+            if user_id:
+                chat_request["user"] = user_id
+        if request.get("service_tier"):
+            mapped = cls.SERVICE_TIER_MAP.get(request["service_tier"])
+            if mapped:
+                chat_request["service_tier"] = mapped
         
-        # 7. Anthropic 特有参数（OpenAI 不直接支持的）
+        # 7. 处理 thinking 参数 -> OpenAI reasoning_effort
+        thinking = request.get("thinking")
+        if thinking and isinstance(thinking, dict):
+            thinking_type = thinking.get("type")
+            if thinking_type == "enabled":
+                # 启用思考：使用 reasoning_effort (如果后端支持)
+                # OpenAI reasoning_effort: none, minimal, low, medium, high, xhigh
+                budget = thinking.get("budget_tokens", 0)
+                if budget >= 32000:
+                    chat_request["reasoning_effort"] = "high"
+                elif budget >= 10000:
+                    chat_request["reasoning_effort"] = "medium"
+                else:
+                    chat_request["reasoning_effort"] = "low"
+            elif thinking_type == "disabled":
+                chat_request["reasoning_effort"] = "none"
+        
+        # 8. Anthropic 特有参数（OpenAI 不直接支持的，放入 extra_body）
         extra = {}
         if request.get("top_k") is not None:
             extra["top_k"] = request["top_k"]
-        if request.get("thinking"):
-            extra["thinking"] = request["thinking"]
+        # thinking 参数也保留原始值以防后端需要
+        if thinking and isinstance(thinking, dict):
+            extra["thinking"] = thinking
+        if request.get("cache_control") is not None:
+            extra["cache_control"] = request["cache_control"]
+        if request.get("container") is not None:
+            extra["container"] = request["container"]
+        if request.get("output_config") is not None:
+            extra["output_config"] = request["output_config"]
         if extra:
             chat_request["extra_body"] = extra
         
         return chat_request
+    
+    @classmethod
+    def _convert_system_blocks(cls, blocks: List[Dict]) -> Union[str, List[Dict], None]:
+        """转换 Anthropic system 内容块列表"""
+        has_complex = False
+        text_parts = []
+        content_parts = []
+        
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            block_type = block.get("type", "")
+            
+            if block_type == "text":
+                text_parts.append(block.get("text", ""))
+                content_parts.append({"type": "text", "text": block.get("text", "")})
+            else:
+                has_complex = True
+        
+        if has_complex:
+            return content_parts if content_parts else None
+        elif text_parts:
+            return "\n".join(text_parts)
+        return None
     
     @classmethod
     def _convert_message(cls, msg: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -137,6 +251,7 @@ class AnthropicConverter:
         Anthropic assistant 消息可能包含 tool_use 块，需要拆分：
         - text 块 -> content
         - tool_use 块 -> tool_calls
+        - thinking 块 -> 保留思考内容或跳过
         Anthropic user 消息可能包含 tool_result 块，需要拆分为 tool 消息
         """
         role = msg.get("role", "")
@@ -155,14 +270,17 @@ class AnthropicConverter:
         elif isinstance(content, list):
             # 内容块数组 - 需要分类处理
             text_parts = []
+            content_parts = []  # OpenAI 多模态内容块
             tool_calls = []
             tool_results = []
+            has_multimodal = False
             
             for block in content:
                 block_type = block.get("type", "")
                 
                 if block_type == "text":
                     text_parts.append(block.get("text", ""))
+                    content_parts.append({"type": "text", "text": block.get("text", "")})
                 
                 elif block_type == "tool_use":
                     # assistant 消息中的工具调用
@@ -180,23 +298,103 @@ class AnthropicConverter:
                     tool_results.append(block)
                 
                 elif block_type == "thinking":
-                    # thinking 块 - OpenAI 不支持，跳过或记录
+                    # thinking 块 - OpenAI 不直接支持相同格式
+                    # 跳过，但记录存在（如果后端支持 reasoning_effort 会自动处理）
+                    pass
+                
+                elif block_type == "redacted_thinking":
+                    # 脱敏思考块 - 跳过
                     pass
                 
                 elif block_type == "image":
-                    # 图片块 - 转为 OpenAI image_url 格式
+                    # 图片块 - 正确转换为 OpenAI image_url 格式
+                    has_multimodal = True
+                    image_url = cls._convert_image_source(block.get("source", {}))
+                    content_parts.append({
+                        "type": "image_url",
+                        "image_url": image_url
+                    })
+                
+                elif block_type == "document":
+                    # 文档块 (PDF等) - 转为 OpenAI file 格式或占位
+                    has_multimodal = True
                     source = block.get("source", {})
                     if source.get("type") == "base64":
-                        media_type = source.get("media_type", "image/png")
+                        media_type = source.get("media_type", "application/pdf")
                         data = source.get("data", "")
-                        text_parts.append(f"[Image: base64 {media_type}]")
+                        # OpenAI Chat API 支持 file 类型的内容块
+                        content_parts.append({
+                            "type": "file",
+                            "file": {
+                                "mime_type": media_type,
+                                "file_data": f"data:{media_type};base64,{data}"
+                            }
+                        })
                     elif source.get("type") == "url":
-                        text_parts.append(f"[Image: {source.get('url', '')}]")
+                        content_parts.append({
+                            "type": "file",
+                            "file": {
+                                "mime_type": source.get("media_type", "application/pdf"),
+                                "file_data": source.get("url", "")
+                            }
+                        })
+                    elif source.get("type") == "text":
+                        text_parts.append(source.get("text", ""))
+                        content_parts.append({"type": "text", "text": source.get("text", "")})
+                
+                elif block_type == "search_result":
+                    # 搜索结果块 - 转为文本表示
+                    search_text = block.get("content", "")
+                    if isinstance(search_text, str):
+                        text_parts.append(f"[Search Result: {search_text}]")
+                    elif isinstance(search_content := search_text, list):
+                        for item in search_content:
+                            if isinstance(item, dict) and item.get("type") == "text":
+                                text_parts.append(f"[Search Result: {item.get('text', '')}]")
+                
+                elif block_type == "server_tool_use":
+                    # 服务器工具调用 - 转为普通工具调用
+                    tool_calls.append({
+                        "id": block.get("id", f"toolu_{uuid.uuid4().hex[:24]}"),
+                        "type": "function",
+                        "function": {
+                            "name": block.get("name", ""),
+                            "arguments": json.dumps(block.get("input", {}), ensure_ascii=False)
+                        }
+                    })
+                
+                elif block_type == "web_search_tool_result":
+                    # 网页搜索工具结果 - 转为工具结果
+                    tool_results.append({
+                        "tool_use_id": block.get("tool_use_id", ""),
+                        "content": block.get("content", ""),
+                    })
+                
+                elif block_type == "web_fetch_tool_result":
+                    # 网页获取工具结果 - 转为工具结果
+                    tool_results.append({
+                        "tool_use_id": block.get("tool_use_id", ""),
+                        "content": block.get("content", ""),
+                    })
+                
+                elif block_type == "code_execution_tool_result":
+                    # 代码执行工具结果 - 转为工具结果
+                    tool_results.append({
+                        "tool_use_id": block.get("tool_use_id", ""),
+                        "content": block.get("content", ""),
+                    })
             
             # 构建 assistant 消息（可能带 tool_calls）
             if role == "assistant":
                 assistant_msg = {"role": "assistant"}
-                if text_parts:
+                if has_multimodal and content_parts:
+                    # 多模态内容
+                    text_content_parts = [p for p in content_parts if p.get("type") == "text"]
+                    if text_content_parts:
+                        assistant_msg["content"] = "\n".join(p.get("text", "") for p in text_content_parts)
+                    else:
+                        assistant_msg["content"] = None
+                elif text_parts:
                     assistant_msg["content"] = "\n".join(text_parts)
                 else:
                     assistant_msg["content"] = None
@@ -206,9 +404,10 @@ class AnthropicConverter:
             
             # 构建 user 消息
             elif role == "user":
-                if text_parts and not tool_results:
-                    result.append({"role": "user", "content": "\n".join(text_parts)})
-                elif text_parts and tool_results:
+                if has_multimodal and content_parts:
+                    # 多模态内容使用 OpenAI 的 content 数组格式
+                    result.append({"role": "user", "content": content_parts})
+                elif text_parts:
                     result.append({"role": "user", "content": "\n".join(text_parts)})
                 
                 # tool_result -> role=tool 消息
@@ -224,9 +423,9 @@ class AnthropicConverter:
                         # 提取文本
                         text_list = []
                         for b in tr_content:
-                            if b.get("type") == "text":
+                            if isinstance(b, dict) and b.get("type") == "text":
                                 text_list.append(b.get("text", ""))
-                        tool_msg["content"] = "\n".join(text_list)
+                        tool_msg["content"] = "\n".join(text_list) if text_list else ""
                     else:
                         tool_msg["content"] = str(tr_content)
                     result.append(tool_msg)
@@ -235,6 +434,29 @@ class AnthropicConverter:
             result.append({"role": openai_role, "content": str(content)})
         
         return result
+    
+    @classmethod
+    def _convert_image_source(cls, source: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        转换 Anthropic 图片源为 OpenAI image_url 格式
+        
+        Anthropic source types:
+        - base64: {"type": "base64", "media_type": "...", "data": "..."}
+        - url: {"type": "url", "url": "..."}
+        
+        OpenAI image_url format:
+        - {"url": "data:image/png;base64,..." | "https://..."}
+        """
+        source_type = source.get("type", "")
+        
+        if source_type == "base64":
+            media_type = source.get("media_type", "image/png")
+            data = source.get("data", "")
+            return {"url": f"data:{media_type};base64,{data}"}
+        elif source_type == "url":
+            return {"url": source.get("url", "")}
+        
+        return {"url": ""}
     
     @classmethod
     def _convert_tools(cls, tools: List[Dict]) -> List[Dict]:
@@ -298,11 +520,12 @@ class AnthropicConverter:
         
         OpenAI: {"id", "model", "choices": [{"message": {"content", "tool_calls"}, "finish_reason"}], "usage"}
         Anthropic: {"id", "type", "role", "content": [{"type": "text"}|{"type": "tool_use"}], 
-                    "model", "stop_reason", "stop_sequence", "usage"}
+                    "model", "stop_reason", "stop_sequence", "stop_details", "usage"}
         """
         choices = response.get("choices", [])
         content_blocks = []
         stop_reason = "end_turn"
+        stop_details = None
         
         for choice in choices:
             message = choice.get("message", {})
@@ -337,12 +560,18 @@ class AnthropicConverter:
             finish_reason = choice.get("finish_reason")
             if finish_reason:
                 stop_reason = cls.STOP_REASON_MAP.get(finish_reason, "end_turn")
+            
+            # 处理 refusal 内容
+            refusal = message.get("refusal")
+            if refusal:
+                stop_reason = "refusal"
+                stop_details = {"reason": "content_policy", "message": refusal}
         
         # 如果没有任何内容块，添加空文本
         if not content_blocks:
             content_blocks.append({"type": "text", "text": ""})
         
-        # 转换 usage
+        # 转换 usage - 包含完整的 Anthropic usage 字段
         usage = response.get("usage", {})
         
         return {
@@ -353,11 +582,12 @@ class AnthropicConverter:
             "model": response.get("model", ""),
             "stop_reason": stop_reason,
             "stop_sequence": None,
+            "stop_details": stop_details,
             "usage": {
                 "input_tokens": usage.get("prompt_tokens", 0),
                 "output_tokens": usage.get("completion_tokens", 0),
-                "cache_creation_input_tokens": 0,
-                "cache_read_input_tokens": 0
+                "cache_creation_input_tokens": usage.get("prompt_tokens_details", {}).get("cached_tokens", 0) if isinstance(usage.get("prompt_tokens_details"), dict) else 0,
+                "cache_read_input_tokens": 0,
             }
         }
     
@@ -375,18 +605,22 @@ class AnthropicConverter:
         """
         转换 OpenAI Chat 流式块到 Anthropic SSE 格式
         
-        Anthropic SSE 事件类型:
+        Anthropic SSE 事件类型（严格按照官方 SDK 定义）:
         - message_start: 包含完整 message 对象（id, type, role, model, usage）
         - content_block_start: 新内容块开始 {"type": "text"|"tool_use", ...}
-        - content_block_delta: 内容增量 {"type": "text_delta"|"input_json_delta", ...}
+        - content_block_delta: 内容增量 {"type": "text_delta"|"input_json_delta"|"thinking_delta", ...}
         - content_block_stop: 内容块结束
-        - message_delta: 消息级增量 (stop_reason, usage)
+        - message_delta: 消息级增量 (stop_reason, stop_details, stop_sequence, usage)
         - message_stop: 消息结束
+        - ping: 心跳
+        
+        注意：Anthropic 的流式事件需要严格按顺序：
+        message_start -> [content_block_start -> content_block_delta* -> content_block_stop]* -> message_delta -> message_stop
         """
         choices = chunk.get("choices", [])
         
         if not choices:
-            return {"type": "message_stop"}
+            return {"type": "ping"}
         
         choice = choices[0]
         delta = choice.get("delta", {})
@@ -395,6 +629,7 @@ class AnthropicConverter:
         # 判断事件类型
         if delta.get("role") == "assistant":
             # 第一个块 - message_start
+            usage = chunk.get("usage", {})
             return {
                 "type": "message_start",
                 "message": {
@@ -405,7 +640,26 @@ class AnthropicConverter:
                     "model": chunk.get("model", ""),
                     "stop_reason": None,
                     "stop_sequence": None,
-                    "usage": {"input_tokens": 0, "output_tokens": 0}
+                    "stop_details": None,
+                    "usage": {
+                        "input_tokens": usage.get("prompt_tokens", 0),
+                        "output_tokens": 0,
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": 0,
+                    }
+                }
+            }
+        
+        # 处理 thinking/reasoning 内容（如果后端返回了 reasoning_token）
+        # OpenAI 在 stream_options.include_usage 时可能在 delta 中包含 reasoning
+        reasoning_content = delta.get("reasoning_content")
+        if reasoning_content is not None:
+            return {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {
+                    "type": "thinking_delta",
+                    "thinking": reasoning_content
                 }
             }
         
@@ -426,7 +680,7 @@ class AnthropicConverter:
             tc_idx = tc.get("index", 0)
             tc_func = tc.get("function", {})
             
-            # 如果有 id 和 name，是 tool_use 开始
+            # 如果有 id 和 name，是 tool_use 开始 -> content_block_start
             if tc.get("id"):
                 return {
                     "type": "content_block_start",
@@ -439,7 +693,7 @@ class AnthropicConverter:
                     }
                 }
             
-            # 否则是 input_json_delta
+            # 否则是 input_json_delta -> content_block_delta
             args_part = tc_func.get("arguments", "")
             if args_part:
                 return {
@@ -452,13 +706,21 @@ class AnthropicConverter:
                 }
         
         if finish_reason:
-            # 消息结束
+            # 消息结束 -> message_delta
             usage = chunk.get("usage", {})
+            stop_reason = cls._map_stop_reason(finish_reason)
+            
+            # 构建 stop_details
+            stop_details = None
+            if stop_reason == "refusal":
+                stop_details = {"reason": "content_policy"}
+            
             return {
                 "type": "message_delta",
                 "delta": {
-                    "stop_reason": cls._map_stop_reason(finish_reason),
-                    "stop_sequence": None
+                    "stop_reason": stop_reason,
+                    "stop_sequence": None,
+                    "stop_details": stop_details,
                 },
                 "usage": {
                     "output_tokens": usage.get("completion_tokens", 0)
