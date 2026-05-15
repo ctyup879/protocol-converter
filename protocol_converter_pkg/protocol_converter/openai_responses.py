@@ -176,6 +176,96 @@ class OpenAIResponsesConverter:
         return converted
     
     @classmethod
+    def from_openai_chat_request(cls, request: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        OpenAI Chat 请求转换为 OpenAI Responses 格式
+        
+        Args:
+            request: OpenAI Chat 格式请求
+            
+        Returns:
+            Dict: OpenAI Responses 格式请求
+        """
+        messages = request.get("messages", [])
+        
+        # 尝试提取简单文本输入（用于 OpenRouter 等兼容 API）
+        # 如果所有消息都是简单的 user 消息且内容是字符串，则合并为单个字符串
+        simple_texts = []
+        has_complex = False
+        instructions = None
+        
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            
+            if role == "system":
+                instructions = content
+            elif role == "user" and isinstance(content, str):
+                simple_texts.append(content)
+            else:
+                has_complex = True
+        
+        # 如果是简单文本，使用字符串格式；否则使用数组格式
+        if not has_complex and simple_texts:
+            input_data = "\n".join(simple_texts)
+        elif has_complex:
+            # 使用数组格式（标准 OpenAI Responses 格式）
+            input_items = []
+            for msg in messages:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                
+                if role == "system":
+                    continue  # 已经处理过
+                
+                if isinstance(content, str):
+                    input_items.append({
+                        "type": "message",
+                        "role": role,
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": content
+                            }
+                        ]
+                    })
+                else:
+                    input_items.append({
+                        "type": "message",
+                        "role": role,
+                        "content": content
+                    })
+            input_data = input_items
+        else:
+            input_data = ""
+        
+        # 构建 Responses 请求
+        responses_request = {
+            "model": request.get("model", "gpt-4o"),
+            "input": input_data,
+        }
+        
+        # 添加 instructions（如果有 system 消息且需要保留）
+        if instructions:
+            responses_request["instructions"] = instructions
+        
+        # 可选参数
+        if request.get("temperature") is not None:
+            responses_request["temperature"] = request["temperature"]
+        if request.get("top_p") is not None:
+            responses_request["top_p"] = request["top_p"]
+        if request.get("max_tokens"):
+            responses_request["max_output_tokens"] = request["max_tokens"]
+        if request.get("stream"):
+            responses_request["stream"] = request["stream"]
+        if request.get("tools"):
+            responses_request["tools"] = request["tools"]
+        if request.get("tool_choice"):
+            responses_request["tool_choice"] = request["tool_choice"]
+        
+        return responses_request
+    
+    @classmethod
     def from_openai_chat(cls, response: Dict[str, Any]) -> Dict[str, Any]:
         """
         OpenAI Chat 响应转换为 Responses 格式

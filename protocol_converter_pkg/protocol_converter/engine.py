@@ -26,7 +26,13 @@ class ConversionMode(Enum):
 @dataclass
 class ConverterConfig:
     """转换器配置"""
-    # 目标后端（OpenAI Chat API 端点）
+    # 目标后端类型: "openai" (Chat Completions), "anthropic", 或 "openrouter"
+    backend_type: str = "openai"
+    
+    # 目标后端 URL
+    # OpenAI Chat: https://api.openai.com/v1/chat/completions
+    # Anthropic: https://api.minimaxi.com/anthropic/v1/messages
+    # OpenRouter Responses: https://openrouter.ai/api/v1/responses
     backend_url: str = "https://api.openai.com/v1/chat/completions"
     
     # API 密钥
@@ -53,6 +59,23 @@ class ConverterConfig:
     def get_model(self, model: str) -> str:
         """获取映射后的模型名"""
         return self.model_mapping.get(model, model)
+    
+    def get_auth_headers(self) -> Dict[str, str]:
+        """获取认证请求头"""
+        if self.backend_type == "anthropic":
+            return {
+                "x-api-key": self.api_key or "",
+                "anthropic-version": "2023-06-01"
+            }
+        elif self.backend_type == "openrouter":
+            return {
+                "Authorization": f"Bearer {self.api_key or ''}",
+                "X-OpenRouter-Experimental-Metadata": "enabled"
+            }
+        else:
+            return {
+                "Authorization": f"Bearer {self.api_key or ''}"
+            }
 
 
 @dataclass
