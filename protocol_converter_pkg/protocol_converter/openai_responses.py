@@ -376,6 +376,13 @@ class OpenAIResponsesConverter:
             # MCP 审批响应 - 跳过
             return None
         
+        elif item_type == "input_audio":
+            # 音频输入 - Chat API 不直接支持，转为文本占位
+            return {
+                "role": "user",
+                "content": "[Audio input]"
+            }
+        
         # 未知类型，尝试作为消息处理
         if "role" in item and "content" in item:
             role = cls.ROLE_MAP.get(item.get("role", ""), item.get("role", "user"))
@@ -442,6 +449,12 @@ class OpenAIResponsesConverter:
                     })
                 elif filename:
                     text_parts.append(f"[File: {filename}]")
+            
+            elif item_type == "input_audio":
+                # 音频输入 - Chat API 不直接支持，转为文本占位
+                has_multimodal = True
+                text_parts.append("[Audio input]")
+                content_parts.append({"type": "text", "text": "[Audio input]"})
             
             elif item_type == "reasoning_text":
                 # 推理文本 - Chat API 不直接支持，跳过
@@ -622,7 +635,16 @@ class OpenAIResponsesConverter:
             content = msg.get("content", "")
             
             if role == "system" or role == "developer":
-                instructions = content if isinstance(content, str) else ""
+                # developer 角色映射为 instructions（Responses API 语义）
+                if isinstance(content, str):
+                    instructions = content
+                elif isinstance(content, list):
+                    # 多模态 system/developer 内容，提取文本
+                    text_parts = []
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            text_parts.append(block.get("text", ""))
+                    instructions = "\n".join(text_parts) if text_parts else ""
             elif role == "user" and isinstance(content, str):
                 simple_texts.append(content)
             elif role == "assistant" and msg.get("tool_calls"):
@@ -1237,6 +1259,9 @@ class OpenAIResponsesConverter:
             result["service_tier"] = response["service_tier"]
         if response.get("system_fingerprint"):
             result["system_fingerprint"] = response["system_fingerprint"]
+        # 保留 metadata
+        if response.get("metadata"):
+            result["metadata"] = response["metadata"]
         
         return result
     
@@ -1359,6 +1384,27 @@ class OpenAIResponsesConverter:
         # 2. 文本内容
         if content:
             output_idx = cls._stream_state["output_index"]
+            
+            # 如果 reasoning 项已开始但未关闭，先关闭它
+            if cls._stream_state["reasoning_item_started"]:
+                events.append({
+                    "type": "response.reasoning_text.done",
+                    "output_index": output_idx,
+                    "text": ""
+                })
+                events.append({
+                    "type": "response.output_item.done",
+                    "output_index": output_idx,
+                    "item": {
+                        "type": "reasoning",
+                        "id": f"rs_{uuid.uuid4().hex[:24]}",
+                        "status": "completed",
+                        "content": []
+                    }
+                })
+                cls._stream_state["reasoning_item_started"] = False
+                cls._stream_state["output_index"] += 1
+                output_idx = cls._stream_state["output_index"]
             
             # 如果还没开始消息项，先发 output_item.added + content_part.added
             if not cls._stream_state["message_item_started"]:
@@ -1493,6 +1539,7 @@ class OpenAIResponsesConverter:
                 })
                 cls._stream_state["reasoning_item_started"] = False
                 cls._stream_state["output_index"] += 1
+                output_idx = cls._stream_state["output_index"]
             
             # 关闭消息项
             if cls._stream_state["message_item_started"]:
@@ -1556,22 +1603,25 @@ class OpenAIResponsesConverter:
                 response_status = "incomplete"
                 incomplete_details = {"reason": "content_filter"}
             
-            result = {
-                "type": "response.completed",
-                "response": {
-                    "id": chunk.get("id", ""),
-                    "object": "response",
-                    "status": response_status,
-                    "output": [],
-                    "usage": {
-                        "input_tokens": usage.get("prompt_tokens", 0),
-                        "output_tokens": usage.get("completion_tokens", 0),
-                        "total_tokens": usage.get("total_tokens", 0)
-                    }
+            completed_response = {
+                "id": chunk.get("id", ""),
+                "object": "response",
+                "status": response_status,
+                "model": chunk.get("model", ""),
+                "output": [],
+                "usage": {
+                    "input_tokens": usage.get("prompt_tokens", 0),
+                    "output_tokens": usage.get("completion_tokens", 0),
+                    "total_tokens": usage.get("total_tokens", 0)
                 }
             }
             if incomplete_details:
-                result["response"]["incomplete_details"] = incomplete_details
+                completed_response["incomplete_details"] = incomplete_details
+            
+            result = {
+                "type": "response.completed",
+                "response": completed_response
+            }
             
             events.append(result)
             return events

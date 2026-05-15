@@ -29,7 +29,7 @@ class ProtocolDetector:
     # OpenAI Responses API 特征
     OPENAI_RESPONSES_KEYS = {"model", "input", "max_output_tokens"}
     OPENAI_RESPONSES_INPUT_TYPES = {"message", "text", "image", "function_call", "function_call_output",
-                                     "input_text", "input_image", "input_file",
+                                     "input_text", "input_image", "input_file", "input_audio",
                                      "computer_call_output", "reasoning",
                                      "local_shell_call_output", "mcp_approval_response"}
     # Responses API 特有参数（Chat API 不存在这些参数）

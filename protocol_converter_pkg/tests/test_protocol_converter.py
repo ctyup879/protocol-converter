@@ -1042,12 +1042,13 @@ class TestAnthropicStreamingSequence:
         
         events = AnthropicConverter.convert_stream_chunk(finish_chunk)
         
-        # 应该包含: content_block_stop + message_delta
+        # 应该包含: content_block_stop + message_delta + message_stop
         event_types = [e["type"] for e in events]
         assert "content_block_stop" in event_types
         assert "message_delta" in event_types
-        # message_delta 应该是最后一个事件
-        assert events[-1]["type"] == "message_delta"
+        assert "message_stop" in event_types
+        # message_stop 必须是最后一个事件
+        assert events[-1]["type"] == "message_stop"
 
     def test_thinking_delta(self):
         """测试 thinking 内容转换为 thinking_delta"""
@@ -2685,3 +2686,326 @@ class TestStopParamAsString:
         engine = ProtocolConverterEngine(config)
         result = engine._chat_to_anthropic_request(request)
         assert result["stop_sequences"] == ["END", "STOP"]
+
+
+class TestAnthropicStreamingMessageStop:
+    """测试 Anthropic 流式事件包含 message_stop"""
+
+    def setup_method(self):
+        AnthropicConverter.reset_stream_state()
+
+    def test_message_stop_event_present(self):
+        """测试 finish_reason 时包含 message_stop 事件"""
+        start_chunk = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{"delta": {"role": "assistant"}, "index": 0}]
+        }
+        AnthropicConverter.convert_stream_chunk(start_chunk)
+
+        text_chunk = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{"delta": {"content": "Hello"}, "index": 0}]
+        }
+        AnthropicConverter.convert_stream_chunk(text_chunk)
+
+        finish_chunk = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{
+                "delta": {},
+                "finish_reason": "stop",
+                "index": 0
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5}
+        }
+
+        events = AnthropicConverter.convert_stream_chunk(finish_chunk)
+
+        event_types = [e["type"] for e in events]
+        assert "message_stop" in event_types
+        # message_stop 必须是最后一个事件
+        assert events[-1]["type"] == "message_stop"
+
+    def test_thinking_then_text_block_sequence(self):
+        """测试 thinking 块关闭后开始 text 块"""
+        start_chunk = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{"delta": {"role": "assistant"}, "index": 0}]
+        }
+        AnthropicConverter.convert_stream_chunk(start_chunk)
+
+        # Thinking chunk
+        thinking_chunk = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{
+                "delta": {"reasoning_content": "Let me think..."},
+                "index": 0
+            }]
+        }
+        thinking_events = AnthropicConverter.convert_stream_chunk(thinking_chunk)
+
+        # Thinking block should be at index 0
+        start_event = [e for e in thinking_events if e["type"] == "content_block_start"][0]
+        assert start_event["index"] == 0
+        assert start_event["content_block"]["type"] == "thinking"
+
+        # Text chunk (after thinking)
+        text_chunk = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{
+                "delta": {"content": "The answer is..."},
+                "index": 0
+            }]
+        }
+        text_events = AnthropicConverter.convert_stream_chunk(text_chunk)
+
+        event_types = [e["type"] for e in text_events]
+        # Should close thinking block first
+        assert "content_block_stop" in event_types
+        # Then start text block
+        assert "content_block_start" in event_types
+        # Text block should be at index 1 (after thinking at index 0)
+        text_start = [e for e in text_events if e["type"] == "content_block_start"][0]
+        assert text_start["index"] == 1
+        assert text_start["content_block"]["type"] == "text"
+
+    def test_thinking_then_tool_use_block_sequence(self):
+        """测试 thinking 块关闭后开始 tool_use 块"""
+        start_chunk = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{"delta": {"role": "assistant"}, "index": 0}]
+        }
+        AnthropicConverter.convert_stream_chunk(start_chunk)
+
+        # Thinking chunk
+        thinking_chunk = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{
+                "delta": {"reasoning_content": "I need to use a tool..."},
+                "index": 0
+            }]
+        }
+        AnthropicConverter.convert_stream_chunk(thinking_chunk)
+
+        # Tool call chunk
+        tool_chunk = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "id": "call_123",
+                        "index": 0,
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": ""}
+                    }]
+                },
+                "index": 0
+            }]
+        }
+
+        events = AnthropicConverter.convert_stream_chunk(tool_chunk)
+
+        event_types = [e["type"] for e in events]
+        # Should close thinking block first
+        assert "content_block_stop" in event_types
+        # Then start tool_use block
+        assert "content_block_start" in event_types
+        # Tool block should be at index 1 (after thinking at index 0)
+        tool_start = [e for e in events if e["type"] == "content_block_start"][0]
+        assert tool_start["index"] == 1
+        assert tool_start["content_block"]["type"] == "tool_use"
+
+
+class TestAnnotationsToCitationsMapping:
+    """测试 Chat annotations → Anthropic citations 映射"""
+
+    def test_chat_annotations_to_anthropic_citations(self):
+        """测试 Chat message.annotations 映射为 Anthropic text.citations"""
+        chat_response = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{
+                "message": {
+                    "content": "The sky is blue.",
+                    "annotations": [{"type": "url_citation", "url": "https://example.com"}]
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        }
+
+        result = AnthropicConverter.from_openai_chat(chat_response)
+
+        text_blocks = [b for b in result["content"] if b.get("type") == "text"]
+        assert len(text_blocks) == 1
+        assert "citations" in text_blocks[0]
+        assert text_blocks[0]["citations"] == [{"type": "url_citation", "url": "https://example.com"}]
+
+    def test_chat_without_annotations_no_citations(self):
+        """测试 Chat 消息无 annotations 时不添加 citations"""
+        chat_response = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{
+                "message": {"content": "Hello!"},
+                "finish_reason": "stop"
+            }]
+        }
+
+        result = AnthropicConverter.from_openai_chat(chat_response)
+
+        text_blocks = [b for b in result["content"] if b.get("type") == "text"]
+        assert len(text_blocks) == 1
+        assert "citations" not in text_blocks[0]
+
+
+class TestResponsesStreamingReasoningClose:
+    """测试 Responses 流式中 reasoning 项正确关闭"""
+
+    def setup_method(self):
+        OpenAIResponsesConverter.reset_stream_state()
+
+    def test_reasoning_closed_before_message_item(self):
+        """测试 reasoning 项在 message 项开始前正确关闭"""
+        start_chunk = {
+            "id": "resp_123",
+            "model": "o3",
+            "choices": [{"delta": {"role": "assistant"}, "index": 0}]
+        }
+        OpenAIResponsesConverter.convert_stream_chunk(start_chunk)
+
+        # Reasoning chunk
+        reasoning_chunk = {
+            "id": "resp_123",
+            "model": "o3",
+            "choices": [{
+                "delta": {"reasoning_content": "Let me reason..."},
+                "index": 0
+            }]
+        }
+        OpenAIResponsesConverter.convert_stream_chunk(reasoning_chunk)
+
+        # Text chunk (after reasoning)
+        text_chunk = {
+            "id": "resp_123",
+            "model": "o3",
+            "choices": [{
+                "delta": {"content": "The answer is 42."},
+                "index": 0
+            }]
+        }
+
+        events = OpenAIResponsesConverter.convert_stream_chunk(text_chunk)
+
+        event_types = [e["type"] for e in events]
+        # Should close reasoning item first
+        assert "response.reasoning_text.done" in event_types
+        assert "response.output_item.done" in event_types
+        # Then start message item
+        assert "response.output_item.added" in event_types
+        assert "response.content_part.added" in event_types
+        # Then text delta
+        assert "response.output_text.delta" in event_types
+
+    def test_response_completed_includes_model(self):
+        """测试 response.completed 事件包含 model 字段"""
+        start_chunk = {
+            "id": "resp_123",
+            "model": "o3",
+            "choices": [{"delta": {"role": "assistant"}, "index": 0}]
+        }
+        OpenAIResponsesConverter.convert_stream_chunk(start_chunk)
+
+        text_chunk = {
+            "id": "resp_123",
+            "model": "o3",
+            "choices": [{
+                "delta": {"content": "Hello"},
+                "index": 0
+            }]
+        }
+        OpenAIResponsesConverter.convert_stream_chunk(text_chunk)
+
+        finish_chunk = {
+            "id": "resp_123",
+            "model": "o3",
+            "choices": [{
+                "delta": {},
+                "finish_reason": "stop",
+                "index": 0
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5}
+        }
+
+        events = OpenAIResponsesConverter.convert_stream_chunk(finish_chunk)
+
+        completed_events = [e for e in events if e["type"] == "response.completed"]
+        assert len(completed_events) == 1
+        assert "model" in completed_events[0]["response"]
+        assert completed_events[0]["response"]["model"] == "o3"
+
+
+class TestDeveloperRoleInstructions:
+    """测试 developer 角色消息转换为 Responses instructions"""
+
+    def test_developer_role_to_instructions(self):
+        """测试 Chat developer 角色消息映射为 Responses instructions"""
+        chat_request = {
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "developer", "content": "You are a code expert."},
+                {"role": "user", "content": "Hello"}
+            ]
+        }
+
+        result = OpenAIResponsesConverter.from_openai_chat_request(chat_request)
+
+        assert result.get("instructions") == "You are a code expert."
+
+    def test_system_role_to_instructions(self):
+        """测试 Chat system 角色消息映射为 Responses instructions"""
+        chat_request = {
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "system", "content": "You are helpful."},
+                {"role": "user", "content": "Hello"}
+            ]
+        }
+
+        result = OpenAIResponsesConverter.from_openai_chat_request(chat_request)
+
+        assert result.get("instructions") == "You are helpful."
+
+
+class TestResponsesMetadataPreservation:
+    """测试 Responses 响应 metadata 保留"""
+
+    def test_metadata_preserved_in_chat_response(self):
+        """测试 Responses metadata 在 Chat 响应中保留"""
+        responses_response = {
+            "id": "resp_123",
+            "object": "response",
+            "status": "completed",
+            "model": "gpt-4o",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Hello"}]
+            }],
+            "usage": {"input_tokens": 5, "output_tokens": 2, "total_tokens": 7},
+            "metadata": {"user_id": "user_123", "session_id": "sess_456"}
+        }
+
+        result = OpenAIResponsesConverter.to_chat_response(responses_response)
+
+        assert "metadata" in result
+        assert result["metadata"]["user_id"] == "user_123"
+        assert result["metadata"]["session_id"] == "sess_456"

@@ -659,10 +659,14 @@ class AnthropicConverter:
             
             # 处理文本内容
             if content:
-                content_blocks.append({
+                text_block = {
                     "type": "text",
                     "text": content
-                })
+                }
+                # 保留 annotations -> citations 映射
+                if message.get("annotations"):
+                    text_block["citations"] = message["annotations"]
+                content_blocks.append(text_block)
             
             # 处理工具调用
             for tc in tool_calls:
@@ -783,6 +787,9 @@ class AnthropicConverter:
         "text_block_index": 0,
         "tool_block_index": 1,  # text 块默认 index 0, tool 块从 1 开始
         "started_tool_ids": set(),  # 已发出 content_block_start 的 tool id
+        "thinking_block_started": False,
+        "thinking_block_index": None,  # thinking 块的索引（如果有）
+        "next_block_index": 0,  # 下一个可用块索引
     }
     
     @classmethod
@@ -793,6 +800,9 @@ class AnthropicConverter:
             "text_block_index": 0,
             "tool_block_index": 1,
             "started_tool_ids": set(),
+            "thinking_block_started": False,
+            "thinking_block_index": None,
+            "next_block_index": 0,
         }
     
     @classmethod
@@ -848,11 +858,11 @@ class AnthropicConverter:
         reasoning_content = delta.get("reasoning_content")
         if reasoning_content is not None:
             # 如果还没开始 thinking 块，先发 content_block_start
-            thinking_key = "_thinking_block_started"
-            if not cls._stream_state.get(thinking_key):
-                cls._stream_state[thinking_key] = True
-                thinking_idx = cls._stream_state["text_block_index"]
-                cls._stream_state["tool_block_index"] = thinking_idx + 2
+            if not cls._stream_state["thinking_block_started"]:
+                cls._stream_state["thinking_block_started"] = True
+                thinking_idx = cls._stream_state["next_block_index"]
+                cls._stream_state["thinking_block_index"] = thinking_idx
+                cls._stream_state["next_block_index"] = thinking_idx + 1
                 events.append({
                     "type": "content_block_start",
                     "index": thinking_idx,
@@ -864,7 +874,7 @@ class AnthropicConverter:
                 })
             events.append({
                 "type": "content_block_delta",
-                "index": cls._stream_state["text_block_index"],
+                "index": cls._stream_state["thinking_block_index"],
                 "delta": {
                     "type": "thinking_delta",
                     "thinking": reasoning_content
@@ -874,7 +884,7 @@ class AnthropicConverter:
             # 用于多轮对话的 thinking 连续性，Chat API 不提供真实 signature
             events.append({
                 "type": "content_block_delta",
-                "index": cls._stream_state["text_block_index"],
+                "index": cls._stream_state["thinking_block_index"],
                 "delta": {
                     "type": "signature_delta",
                     "signature": ""  # Chat API 不提供 signature
@@ -884,12 +894,23 @@ class AnthropicConverter:
         
         # 3. 处理文本内容
         if delta.get("content") is not None and delta["content"] != "":
+            # 如果 thinking 块已开始但未关闭，先关闭它
+            if cls._stream_state["thinking_block_started"]:
+                cls._stream_state["thinking_block_started"] = False
+                events.append({
+                    "type": "content_block_stop",
+                    "index": cls._stream_state["thinking_block_index"]
+                })
+            
             # 如果还没开始文本块，先发 content_block_start
             if not cls._stream_state["text_block_started"]:
                 cls._stream_state["text_block_started"] = True
+                text_idx = cls._stream_state["next_block_index"]
+                cls._stream_state["text_block_index"] = text_idx
+                cls._stream_state["next_block_index"] = text_idx + 1
                 events.append({
                     "type": "content_block_start",
-                    "index": cls._stream_state["text_block_index"],
+                    "index": text_idx,
                     "content_block": {
                         "type": "text",
                         "text": ""
@@ -915,6 +936,14 @@ class AnthropicConverter:
                 
                 # 如果有 id，是 tool_use 开始 -> content_block_start
                 if tc_id and tc_id not in cls._stream_state["started_tool_ids"]:
+                    # 如果 thinking 块已开始，先关闭它
+                    if cls._stream_state["thinking_block_started"]:
+                        cls._stream_state["thinking_block_started"] = False
+                        events.append({
+                            "type": "content_block_stop",
+                            "index": cls._stream_state["thinking_block_index"]
+                        })
+                    
                     # 如果文本块已开始但还没关闭，先关闭文本块
                     if cls._stream_state["text_block_started"]:
                         cls._stream_state["text_block_started"] = False
@@ -923,20 +952,11 @@ class AnthropicConverter:
                             "index": cls._stream_state["text_block_index"]
                         })
                     
-                    # 如果有 thinking 块已开始，先关闭它
-                    thinking_key = "_thinking_block_started"
-                    if cls._stream_state.get(thinking_key):
-                        cls._stream_state[thinking_key] = False
-                        events.append({
-                            "type": "content_block_stop",
-                            "index": cls._stream_state["text_block_index"]
-                        })
-                    
                     # 计算此 tool 块的索引
-                    tool_idx = cls._stream_state["tool_block_index"]
+                    tool_idx = cls._stream_state["next_block_index"]
                     cls._stream_state["started_tool_ids"].add(tc_id)
                     cls._stream_state[f"_tool_idx_{tc_id}"] = tool_idx
-                    cls._stream_state["tool_block_index"] = tool_idx + 1
+                    cls._stream_state["next_block_index"] = tool_idx + 1
                     
                     events.append({
                         "type": "content_block_start",
@@ -967,14 +987,15 @@ class AnthropicConverter:
         # 5. 消息结束
         if finish_reason:
             # 关闭所有未关闭的 content blocks
-            if cls._stream_state["text_block_started"]:
+            if cls._stream_state["thinking_block_started"]:
+                cls._stream_state["thinking_block_started"] = False
                 events.append({
                     "type": "content_block_stop",
-                    "index": cls._stream_state["text_block_index"]
+                    "index": cls._stream_state["thinking_block_index"]
                 })
             
-            thinking_key = "_thinking_block_started"
-            if cls._stream_state.get(thinking_key):
+            if cls._stream_state["text_block_started"]:
+                cls._stream_state["text_block_started"] = False
                 events.append({
                     "type": "content_block_stop",
                     "index": cls._stream_state["text_block_index"]
@@ -1006,6 +1027,11 @@ class AnthropicConverter:
                 "usage": {
                     "output_tokens": usage.get("completion_tokens", 0)
                 }
+            })
+            
+            # message_stop 事件（Anthropic SSE 严格序列要求）
+            events.append({
+                "type": "message_stop"
             })
             
             return events
