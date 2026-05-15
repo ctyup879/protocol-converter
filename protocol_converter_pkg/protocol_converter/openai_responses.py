@@ -207,7 +207,7 @@ class OpenAIResponsesConverter:
             chat_request["temperature"] = request["temperature"]
         if request.get("top_p") is not None:
             chat_request["top_p"] = request["top_p"]
-        if request.get("max_output_tokens"):
+        if request.get("max_output_tokens") is not None:
             chat_request["max_completion_tokens"] = request["max_output_tokens"]
         if tools:
             chat_request["tools"] = tools
@@ -731,9 +731,9 @@ class OpenAIResponsesConverter:
             responses_request["temperature"] = request["temperature"]
         if request.get("top_p") is not None:
             responses_request["top_p"] = request["top_p"]
-        if request.get("max_completion_tokens"):
+        if request.get("max_completion_tokens") is not None:
             responses_request["max_output_tokens"] = request["max_completion_tokens"]
-        elif request.get("max_tokens"):
+        elif request.get("max_tokens") is not None:
             responses_request["max_output_tokens"] = request["max_tokens"]
         if request.get("stream"):
             responses_request["stream"] = request["stream"]
@@ -945,6 +945,7 @@ class OpenAIResponsesConverter:
                         "type": "reasoning_text",
                         "text": reasoning_content
                     }],
+                    "summary": [],  # Responses API: summary 是必填字段 (List[Summary])
                     "status": "completed"
                 })
             
@@ -1093,9 +1094,22 @@ class OpenAIResponsesConverter:
             elif item_type == "reasoning":
                 # reasoning 输出项 -> reasoning_content (OpenAI o系列格式)
                 reasoning_texts = []
+                # 处理 content 中的 reasoning_text（实时推理内容）
                 for c in item.get("content", []):
-                    if isinstance(c, dict) and c.get("type") == "reasoning_text":
-                        reasoning_texts.append(c.get("text", ""))
+                    if isinstance(c, dict):
+                        c_type = c.get("type", "")
+                        if c_type == "reasoning_text":
+                            reasoning_texts.append(c.get("text", ""))
+                        elif c_type == "summary_text":
+                            # Responses SDK: reasoning 项 summary 字段中的摘要文本
+                            # 也应纳入 reasoning_content 以保留推理信息
+                            reasoning_texts.append(c.get("text", ""))
+                # 处理 summary 字段 (Responses API: summary 是必填字段)
+                for s in item.get("summary", []):
+                    if isinstance(s, dict) and s.get("type") == "summary_text":
+                        text = s.get("text", "")
+                        if text and text not in reasoning_texts:
+                            reasoning_texts.append(text)
                 if reasoning_texts:
                     reasoning_content = "\n".join(reasoning_texts)
             
@@ -1288,6 +1302,153 @@ class OpenAIResponsesConverter:
         """
         from .anthropic import AnthropicConverter
         return AnthropicConverter.to_openai_responses(response)
+    
+    # ================================================================
+    # 响应转换：Responses -> Anthropic (直接转换，避免经 Chat 中转丢失数据)
+    # ================================================================
+    
+    @classmethod
+    def to_anthropic(cls, response: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        OpenAI Responses 响应直接转换为 Anthropic 格式
+        
+        保留 reasoning 的 summary 和 encrypted_content，
+        避免 Responses→Chat→Anthropic 中转丢失数据。
+        """
+        content_blocks = []
+        stop_reason = "end_turn"
+        stop_details = None
+        
+        output = response.get("output", [])
+        
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            item_type = item.get("type", "")
+            
+            if item_type == "reasoning":
+                # reasoning 输出项 → thinking 块或 redacted_thinking 块
+                encrypted_content = item.get("encrypted_content")
+                
+                if encrypted_content and not item.get("content"):
+                    # 仅含 encrypted_content，无可见内容 → redacted_thinking
+                    content_blocks.append({
+                        "type": "redacted_thinking",
+                        "data": encrypted_content,  # Anthropic SDK: RedactedThinkingBlock.data
+                    })
+                else:
+                    # 有可见推理内容 → thinking 块
+                    reasoning_texts = []
+                    for c in item.get("content", []):
+                        if isinstance(c, dict):
+                            c_type = c.get("type", "")
+                            if c_type == "reasoning_text":
+                                reasoning_texts.append(c.get("text", ""))
+                            elif c_type == "summary_text":
+                                reasoning_texts.append(c.get("text", ""))
+                    # summary 字段中的摘要也纳入
+                    for s in item.get("summary", []):
+                        if isinstance(s, dict) and s.get("type") == "summary_text":
+                            text = s.get("text", "")
+                            if text and text not in reasoning_texts:
+                                reasoning_texts.append(text)
+                    
+                    if reasoning_texts:
+                        thinking_block = {
+                            "type": "thinking",
+                            "thinking": "\n".join(reasoning_texts),
+                            "signature": encrypted_content or "",  # Anthropic SDK: ThinkingBlock.signature
+                        }
+                        content_blocks.append(thinking_block)
+            
+            elif item_type == "message":
+                content_list = item.get("content", [])
+                for c in content_list:
+                    if not isinstance(c, dict):
+                        continue
+                    c_type = c.get("type", "")
+                    if c_type in ("output_text", "text"):
+                        text_block = {
+                            "type": "text",
+                            "text": c.get("text", "")
+                        }
+                        # 保留 annotations → citations
+                        if c.get("annotations"):
+                            text_block["citations"] = c["annotations"]
+                        content_blocks.append(text_block)
+            
+            elif item_type == "function_call":
+                args_str = item.get("arguments", "{}")
+                try:
+                    args_obj = json.loads(args_str) if isinstance(args_str, str) else args_str
+                except (json.JSONDecodeError, TypeError):
+                    args_obj = {}
+                
+                content_blocks.append({
+                    "type": "tool_use",
+                    "id": item.get("call_id", item.get("id", f"toolu_{uuid.uuid4().hex[:24]}")),
+                    "name": item.get("name", ""),
+                    "input": args_obj
+                })
+        
+        # 如果没有任何内容块，添加空文本
+        if not content_blocks:
+            content_blocks.append({"type": "text", "text": ""})
+        
+        # 映射停止原因
+        status = response.get("status", "completed")
+        if status == "incomplete":
+            details = response.get("incomplete_details", {})
+            reason = details.get("reason", "") if details else ""
+            if reason == "max_output_tokens":
+                stop_reason = "max_tokens"
+            elif reason == "content_filter":
+                stop_reason = "refusal"
+                stop_details = {"reason": "content_policy"}
+        elif status == "failed":
+            stop_reason = "refusal"
+            stop_details = {"reason": "content_policy"}
+            error = response.get("error")
+            if error and isinstance(error, dict):
+                stop_details["message"] = error.get("message", "")
+        
+        # 转换 usage
+        usage = response.get("usage", {})
+        anthropic_usage = {
+            "input_tokens": usage.get("input_tokens", 0),
+            "output_tokens": usage.get("output_tokens", 0),
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+        }
+        
+        # input_tokens_details.cached_tokens → cache_read_input_tokens
+        input_tokens_details = usage.get("input_tokens_details")
+        if isinstance(input_tokens_details, dict):
+            cached_tokens = input_tokens_details.get("cached_tokens", 0)
+            if cached_tokens:
+                anthropic_usage["cache_read_input_tokens"] = cached_tokens
+        
+        # output_tokens_details.reasoning_tokens → 可用于推断 cache_creation
+        output_tokens_details = usage.get("output_tokens_details")
+        if isinstance(output_tokens_details, dict):
+            reasoning_tokens = output_tokens_details.get("reasoning_tokens", 0)
+            if reasoning_tokens:
+                # Anthropic 没有直接暴露 reasoning_tokens，但保留为参考
+                pass
+        
+        result = {
+            "id": response.get("id", f"msg_{uuid.uuid4().hex[:24]}"),
+            "type": "message",
+            "role": "assistant",
+            "content": content_blocks,
+            "model": response.get("model", ""),
+            "stop_reason": stop_reason,
+            "stop_sequence": None,
+            "stop_details": stop_details,
+            "usage": anthropic_usage
+        }
+        
+        return result
     
     # ================================================================
     # 流式转换

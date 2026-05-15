@@ -3658,3 +3658,350 @@ class TestResponsesWebSearchOptionsDetail:
         ws_opts = result.get("web_search_options", {})
         assert ws_opts.get("search_context_size") == "low"
         assert ws_opts.get("user_location", {}).get("city") == "Tokyo"
+
+
+class TestRedactedThinkingDataField:
+    """测试 RedactedThinkingBlock 使用 data 字段（SDK 规范）"""
+
+    def test_redacted_thinking_data_field_in_to_openai_responses(self):
+        """测试 Anthropic redacted_thinking 的 data 字段映射到 Responses encrypted_content"""
+        anthropic_response = {
+            "id": "msg_123",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "redacted_thinking", "data": "ErUB3jkH...encrypted..."},
+                {"type": "text", "text": "Hello!"}
+            ],
+            "model": "claude-sonnet-4-20250514",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        }
+        result = AnthropicConverter.to_openai_responses(anthropic_response)
+        # 找到 reasoning 输出项
+        reasoning_items = [item for item in result["output"] if item.get("type") == "reasoning"]
+        assert len(reasoning_items) == 1
+        assert reasoning_items[0]["encrypted_content"] == "ErUB3jkH...encrypted..."
+        assert reasoning_items[0]["content"] == []
+        assert "summary" in reasoning_items[0]  # summary 是必填字段
+
+    def test_redacted_thinking_signature_fallback(self):
+        """测试 redacted_thinking 兼容旧版 signature 字段"""
+        anthropic_response = {
+            "id": "msg_123",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "redacted_thinking", "signature": "old_sig_value"},
+                {"type": "text", "text": "Hello!"}
+            ],
+            "model": "claude-sonnet-4-20250514",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        }
+        result = AnthropicConverter.to_openai_responses(anthropic_response)
+        reasoning_items = [item for item in result["output"] if item.get("type") == "reasoning"]
+        assert len(reasoning_items) == 1
+        # data 优先，无 data 时 fallback 到 signature
+        assert reasoning_items[0]["encrypted_content"] == "old_sig_value"
+
+
+class TestAnthropicToolChoiceDisableParallel:
+    """测试 Anthropic tool_choice 的 disable_parallel_tool_use 映射"""
+
+    def test_auto_with_disable_parallel(self):
+        """测试 tool_choice auto + disable_parallel_tool_use → Chat required + parallel_tool_calls=False"""
+        request = {
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tool_choice": {"type": "auto", "disable_parallel_tool_use": True}
+        }
+        result = AnthropicConverter.to_openai_chat(request)
+        assert result["tool_choice"] == "auto"
+        assert result.get("parallel_tool_calls") is False
+
+    def test_any_with_disable_parallel(self):
+        """测试 tool_choice any + disable_parallel_tool_use → Chat required + parallel_tool_calls=False"""
+        request = {
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tool_choice": {"type": "any", "disable_parallel_tool_use": True}
+        }
+        result = AnthropicConverter.to_openai_chat(request)
+        assert result["tool_choice"] == "required"
+        assert result.get("parallel_tool_calls") is False
+
+    def test_tool_with_disable_parallel(self):
+        """测试 tool_choice tool + disable_parallel_tool_use → Chat function + parallel_tool_calls=False"""
+        request = {
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tool_choice": {"type": "tool", "name": "get_weather", "disable_parallel_tool_use": True}
+        }
+        result = AnthropicConverter.to_openai_chat(request)
+        assert result["tool_choice"]["type"] == "function"
+        assert result["tool_choice"]["function"]["name"] == "get_weather"
+        assert result.get("parallel_tool_calls") is False
+
+    def test_auto_without_disable_parallel(self):
+        """测试 tool_choice auto 无 disable_parallel_tool_use → 不设置 parallel_tool_calls"""
+        request = {
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tool_choice": {"type": "auto"}
+        }
+        result = AnthropicConverter.to_openai_chat(request)
+        assert result["tool_choice"] == "auto"
+        assert "parallel_tool_calls" not in result
+
+
+class TestChatToAnthropicParallelToolCalls:
+    """测试 Chat parallel_tool_calls: False → Anthropic tool_choice.disable_parallel_tool_use"""
+
+    def test_required_with_parallel_false(self):
+        """测试 Chat tool_choice=required + parallel_tool_calls=False → Anthropic any + disable"""
+        config = ConverterConfig(backend_type="anthropic")
+        engine = ProtocolConverterEngine(config)
+        request = {
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tool_choice": "required",
+            "parallel_tool_calls": False
+        }
+        result = engine._chat_to_anthropic_request(request)
+        assert result["tool_choice"]["type"] == "any"
+        assert result["tool_choice"]["disable_parallel_tool_use"] is True
+
+    def test_function_choice_with_parallel_false(self):
+        """测试 Chat function tool_choice + parallel_tool_calls=False"""
+        config = ConverterConfig(backend_type="anthropic")
+        engine = ProtocolConverterEngine(config)
+        request = {
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tool_choice": {"type": "function", "function": {"name": "get_weather"}},
+            "parallel_tool_calls": False
+        }
+        result = engine._chat_to_anthropic_request(request)
+        assert result["tool_choice"]["type"] == "tool"
+        assert result["tool_choice"]["name"] == "get_weather"
+        assert result["tool_choice"]["disable_parallel_tool_use"] is True
+
+
+class TestResponsesToAnthropicDirect:
+    """测试 Responses→Anthropic 直接转换（不经 Chat 中转）"""
+
+    def test_reasoning_with_encrypted_content_to_redacted_thinking(self):
+        """测试 Responses reasoning 含 encrypted_content → Anthropic redacted_thinking"""
+        responses_response = {
+            "id": "resp_123",
+            "object": "response",
+            "status": "completed",
+            "model": "o3",
+            "output": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_abc",
+                    "content": [],
+                    "summary": [],
+                    "encrypted_content": "ErUB3jkH...encrypted...",
+                    "status": "completed"
+                },
+                {
+                    "type": "message",
+                    "id": "msg_def",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "Hello!", "annotations": []}]
+                }
+            ],
+            "usage": {"input_tokens": 100, "output_tokens": 50, "total_tokens": 150}
+        }
+        result = OpenAIResponsesConverter.to_anthropic(responses_response)
+        assert result["type"] == "message"
+        # 应有 redacted_thinking 块（使用 data 字段）
+        redacted_blocks = [b for b in result["content"] if b["type"] == "redacted_thinking"]
+        assert len(redacted_blocks) == 1
+        assert redacted_blocks[0]["data"] == "ErUB3jkH...encrypted..."
+        # 应有 text 块
+        text_blocks = [b for b in result["content"] if b["type"] == "text"]
+        assert len(text_blocks) == 1
+        assert text_blocks[0]["text"] == "Hello!"
+
+    def test_reasoning_with_content_to_thinking(self):
+        """测试 Responses reasoning 含 reasoning_text → Anthropic thinking"""
+        responses_response = {
+            "id": "resp_123",
+            "object": "response",
+            "status": "completed",
+            "model": "o3",
+            "output": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_abc",
+                    "content": [{"type": "reasoning_text", "text": "Let me think..."}],
+                    "summary": [],
+                    "status": "completed"
+                },
+                {
+                    "type": "message",
+                    "id": "msg_def",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "42", "annotations": []}]
+                }
+            ],
+            "usage": {"input_tokens": 100, "output_tokens": 50, "total_tokens": 150}
+        }
+        result = OpenAIResponsesConverter.to_anthropic(responses_response)
+        thinking_blocks = [b for b in result["content"] if b["type"] == "thinking"]
+        assert len(thinking_blocks) == 1
+        assert thinking_blocks[0]["thinking"] == "Let me think..."
+        assert "signature" in thinking_blocks[0]
+
+    def test_incomplete_to_max_tokens(self):
+        """测试 Responses incomplete → Anthropic max_tokens"""
+        responses_response = {
+            "id": "resp_123",
+            "object": "response",
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "model": "gpt-4o",
+            "output": [
+                {
+                    "type": "message",
+                    "id": "msg_def",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "Hello...", "annotations": []}]
+                }
+            ],
+            "usage": {"input_tokens": 100, "output_tokens": 50, "total_tokens": 150}
+        }
+        result = OpenAIResponsesConverter.to_anthropic(responses_response)
+        assert result["stop_reason"] == "max_tokens"
+
+
+class TestMaxOutputTokensZeroEdgeCase:
+    """测试 max_output_tokens=0 边界情况（缓存预热）"""
+
+    def test_max_output_tokens_zero_to_chat(self):
+        """测试 Responses max_output_tokens=0 → Chat max_completion_tokens=0"""
+        request = {
+            "model": "gpt-4o",
+            "input": "Hello",
+            "max_output_tokens": 0
+        }
+        result = OpenAIResponsesConverter.to_openai_chat(request)
+        assert result.get("max_completion_tokens") == 0
+
+    def test_max_completion_tokens_zero_to_responses(self):
+        """测试 Chat max_completion_tokens=0 → Responses max_output_tokens=0"""
+        request = {
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_completion_tokens": 0
+        }
+        result = OpenAIResponsesConverter.from_openai_chat_request(request)
+        assert result.get("max_output_tokens") == 0
+
+
+class TestChatToolIsErrorReverseMapping:
+    """测试 Chat tool [Error] 前缀 → Anthropic is_error 反向映射"""
+
+    def test_error_prefix_to_is_error(self):
+        """测试 Chat tool 消息 [Error] 前缀反向映射为 Anthropic is_error"""
+        config = ConverterConfig(backend_type="anthropic")
+        engine = ProtocolConverterEngine(config)
+        request = {
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "user", "content": "What's the weather?"},
+                {"role": "assistant", "content": None, "tool_calls": [
+                    {"id": "call_123", "type": "function", "function": {"name": "get_weather", "arguments": "{}"}}
+                ]},
+                {"role": "tool", "tool_call_id": "call_123", "content": "[Error] API rate limit exceeded"}
+            ]
+        }
+        result = engine._chat_to_anthropic_request(request)
+        # 找到 tool_result 块
+        user_msgs = [m for m in result["messages"] if m["role"] == "user"]
+        tool_result_blocks = []
+        for m in user_msgs:
+            for b in m.get("content", []):
+                if isinstance(b, dict) and b.get("type") == "tool_result":
+                    tool_result_blocks.append(b)
+        assert len(tool_result_blocks) == 1
+        assert tool_result_blocks[0]["is_error"] is True
+        assert tool_result_blocks[0]["content"] == "API rate limit exceeded"
+
+    def test_normal_tool_result_no_is_error(self):
+        """测试正常 tool 消息不添加 is_error"""
+        config = ConverterConfig(backend_type="anthropic")
+        engine = ProtocolConverterEngine(config)
+        request = {
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "user", "content": "What's the weather?"},
+                {"role": "assistant", "content": None, "tool_calls": [
+                    {"id": "call_123", "type": "function", "function": {"name": "get_weather", "arguments": "{}"}}
+                ]},
+                {"role": "tool", "tool_call_id": "call_123", "content": "Sunny, 72°F"}
+            ]
+        }
+        result = engine._chat_to_anthropic_request(request)
+        user_msgs = [m for m in result["messages"] if m["role"] == "user"]
+        tool_result_blocks = []
+        for m in user_msgs:
+            for b in m.get("content", []):
+                if isinstance(b, dict) and b.get("type") == "tool_result":
+                    tool_result_blocks.append(b)
+        assert len(tool_result_blocks) == 1
+        assert "is_error" not in tool_result_blocks[0]
+        assert tool_result_blocks[0]["content"] == "Sunny, 72°F"
+
+
+class TestResponsesReasoningSummaryField:
+    """测试 Responses reasoning 输出项的 summary 字段处理"""
+
+    def test_chat_to_responses_reasoning_has_summary(self):
+        """测试 Chat→Responses 转换中 reasoning 输出项包含 summary 字段"""
+        chat_response = {
+            "id": "chatcmpl-123",
+            "model": "o3",
+            "choices": [{
+                "message": {
+                    "content": "42",
+                    "reasoning_content": "Let me think step by step..."
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        }
+        result = OpenAIResponsesConverter.from_openai_chat(chat_response)
+        reasoning_items = [item for item in result["output"] if item.get("type") == "reasoning"]
+        assert len(reasoning_items) == 1
+        assert "summary" in reasoning_items[0]
+
+    def test_anthropic_thinking_to_responses_has_summary(self):
+        """测试 Anthropic thinking→Responses 转换中 reasoning 输出项包含 summary 字段"""
+        anthropic_response = {
+            "id": "msg_123",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "I need to reason...", "signature": "sig_123"},
+                {"type": "text", "text": "Hello!"}
+            ],
+            "model": "claude-sonnet-4-20250514",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        }
+        result = AnthropicConverter.to_openai_responses(anthropic_response)
+        reasoning_items = [item for item in result["output"] if item.get("type") == "reasoning"]
+        assert len(reasoning_items) == 1
+        assert "summary" in reasoning_items[0]

@@ -190,8 +190,8 @@ class AnthropicConverter:
                 if any(tool_type.startswith(prefix) for prefix in ANTHROPIC_SERVER_TOOL_PREFIXES):
                     server_tools.append(tool)
         
-        # 4. 转换 tool_choice
-        tool_choice = cls._convert_tool_choice(request.get("tool_choice"))
+        # 4. 转换 tool_choice（同时提取 disable_parallel_tool_use）
+        tool_choice, parallel_tool_calls_from_tc = cls._convert_tool_choice(request.get("tool_choice"))
         
         # 5. 构建 Chat 请求
         chat_request = {
@@ -213,6 +213,8 @@ class AnthropicConverter:
             chat_request["tools"] = tools
         if tool_choice is not None:
             chat_request["tool_choice"] = tool_choice
+        if parallel_tool_calls_from_tc is not None:
+            chat_request["parallel_tool_calls"] = parallel_tool_calls_from_tc
         if request.get("stop_sequences"):
             chat_request["stop"] = request["stop_sequences"]
         if request.get("metadata"):
@@ -601,31 +603,40 @@ class AnthropicConverter:
         return converted
     
     @classmethod
-    def _convert_tool_choice(cls, tool_choice: Any) -> Optional[Any]:
+    def _convert_tool_choice(cls, tool_choice: Any) -> tuple:
         """
         转换 Anthropic tool_choice 到 OpenAI 格式
         
         Anthropic: "auto" | "any" | "none" | {"type": "tool", "name": "..."}
+        Anthropic dict 类型还支持 disable_parallel_tool_use: bool
+        
         OpenAI: "auto" | "none" | "required" | {"type": "function", "function": {"name": "..."}}
+        
+        Returns:
+            tuple: (tool_choice_value, parallel_tool_calls_value)
+                parallel_tool_calls 为 None 表示不设置，False 表示禁用并行
         """
         if tool_choice is None:
-            return None
+            return None, None
         
         if isinstance(tool_choice, str):
-            return cls.TOOL_CHOICE_MAP.get(tool_choice, tool_choice)
+            return cls.TOOL_CHOICE_MAP.get(tool_choice, tool_choice), None
         
         if isinstance(tool_choice, dict):
+            disable_parallel = tool_choice.get("disable_parallel_tool_use", False)
+            parallel_tool_calls = False if disable_parallel else None
+            
             if tool_choice.get("type") == "tool":
                 return {
                     "type": "function",
                     "function": {"name": tool_choice.get("name", "")}
-                }
+                }, parallel_tool_calls
             if tool_choice.get("type") == "auto":
-                return "auto"
+                return "auto", parallel_tool_calls
             if tool_choice.get("type") == "any":
-                return "required"
+                return "required", parallel_tool_calls
         
-        return None
+        return None, None
     
     # ================================================================
     # 响应转换：OpenAI Chat -> Anthropic
@@ -1085,9 +1096,11 @@ class AnthropicConverter:
                     "type": "reasoning",
                     "id": f"rs_{uuid.uuid4().hex[:24]}",
                     "content": reasoning_content,
+                    "summary": [],  # Responses API: summary 是必填字段 (List[Summary])
                     "status": "completed",
                 }
                 # 如果有 signature，添加 encrypted_content
+                # Anthropic SDK ThinkingBlock.signature: str
                 signature = block.get("signature")
                 if signature:
                     reasoning_item["encrypted_content"] = signature
@@ -1095,13 +1108,15 @@ class AnthropicConverter:
             
             elif block_type == "redacted_thinking":
                 # 脱敏思考块 -> reasoning 输出项 (仅含 encrypted_content)
-                signature = block.get("signature")
-                if signature:
+                # Anthropic SDK RedactedThinkingBlock: data 字段 (非 signature)
+                redacted_data = block.get("data") or block.get("signature")
+                if redacted_data:
                     output.append({
                         "type": "reasoning",
                         "id": f"rs_{uuid.uuid4().hex[:24]}",
                         "content": [],
-                        "encrypted_content": signature,
+                        "summary": [],
+                        "encrypted_content": redacted_data,
                         "status": "completed",
                     })
             

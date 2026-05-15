@@ -274,13 +274,19 @@ class ProtocolConverterEngine:
             
             if role == "tool":
                 # tool 消息转换为 user 消息中的 tool_result 块
+                tool_content = content if isinstance(content, str) else str(content)
+                tool_result_block = {
+                    "type": "tool_result",
+                    "tool_use_id": msg.get("tool_call_id", ""),
+                    "content": tool_content
+                }
+                # 检测 [Error] 前缀标记，反向映射为 Anthropic is_error 字段
+                if isinstance(tool_content, str) and tool_content.startswith("[Error] "):
+                    tool_result_block["is_error"] = True
+                    tool_result_block["content"] = tool_content[8:]  # 去掉 "[Error] " 前缀
                 anthropic_messages.append({
                     "role": "user",
-                    "content": [{
-                        "type": "tool_result",
-                        "tool_use_id": msg.get("tool_call_id", ""),
-                        "content": content if isinstance(content, str) else str(content)
-                    }]
+                    "content": [tool_result_block]
                 })
                 continue
             
@@ -455,13 +461,24 @@ class ProtocolConverterEngine:
         # 转换 tool_choice
         chat_tool_choice = request.get("tool_choice")
         if chat_tool_choice:
+            # Chat parallel_tool_calls: False → Anthropic tool_choice.disable_parallel_tool_use: True
+            parallel_tool_calls = request.get("parallel_tool_calls")
+            disable_parallel = parallel_tool_calls is False
+            
             if isinstance(chat_tool_choice, str):
                 tc_map = {"auto": "auto", "none": "none", "required": "any"}
-                anthropic_request["tool_choice"] = tc_map.get(chat_tool_choice, chat_tool_choice)
+                tc_value = tc_map.get(chat_tool_choice, chat_tool_choice)
+                if disable_parallel and tc_value in ("auto", "any"):
+                    anthropic_request["tool_choice"] = {"type": tc_value, "disable_parallel_tool_use": True}
+                else:
+                    anthropic_request["tool_choice"] = tc_value
             elif isinstance(chat_tool_choice, dict):
                 if chat_tool_choice.get("type") == "function":
                     func = chat_tool_choice.get("function", {})
-                    anthropic_request["tool_choice"] = {"type": "tool", "name": func.get("name", "")}
+                    tc_dict = {"type": "tool", "name": func.get("name", "")}
+                    if disable_parallel:
+                        tc_dict["disable_parallel_tool_use"] = True
+                    anthropic_request["tool_choice"] = tc_dict
         
         # reasoning_effort -> thinking
         reasoning_effort = request.get("reasoning_effort")
@@ -581,17 +598,16 @@ class ProtocolConverterEngine:
             elif target_protocol == Protocol.OPENAI_CHAT:
                 return self._anthropic_to_chat_response(response)
             elif target_protocol == Protocol.OPENAI_RESPONSES:
-                chat_resp = self._anthropic_to_chat_response(response)
-                return self.openai_responses.from_openai_chat(chat_resp)
+                # 直接转换，保留 redacted_thinking (data字段) → encrypted_content
+                return self.anthropic.to_openai_responses(response)
         
         # 如果后端是 openai_responses 格式
         elif backend_format == "openai_responses":
             if target_protocol == Protocol.OPENAI_RESPONSES:
                 return response
             elif target_protocol == Protocol.ANTHROPIC:
-                # Responses -> Chat -> Anthropic
-                chat_resp = self._responses_to_chat_response(response)
-                return self.anthropic.from_openai_chat(chat_resp)
+                # Responses -> Anthropic: 直接转换保留 summary 和 encrypted_content
+                return self.openai_responses.to_anthropic(response)
             elif target_protocol == Protocol.OPENAI_CHAT:
                 return self._responses_to_chat_response(response)
         
