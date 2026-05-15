@@ -222,6 +222,13 @@ class ProtocolConverterEngine:
             if mapped_model != original_model:
                 result["model"] = mapped_model
         
+        # 对 Chat 后端，将 developer 角色降级为 system（部分后端不支持 developer）
+        if isinstance(result, dict) and target_format == "openai_chat":
+            messages = result.get("messages", [])
+            for msg in messages:
+                if isinstance(msg, dict) and msg.get("role") == "developer":
+                    msg["role"] = "system"
+        
         # 合并 extra_body（将 extra_body 中的字段合并到请求中）
         if isinstance(result, dict) and "extra_body" in result:
             extra = result.pop("extra_body")

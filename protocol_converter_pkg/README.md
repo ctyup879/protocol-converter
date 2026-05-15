@@ -12,6 +12,8 @@
 - **流式支持**：完整的 SSE 流式转换，严格遵循各协议事件序列（含 `content_block_start/stop`、`output_item.added/done` 等）
 - **工具调用**：完整支持 function calling / tool_use / tool_result 跨协议转换
 - **扩展思考**：Anthropic `thinking` ↔ OpenAI `reasoning_effort` / `reasoning_content` 双向映射（含 `adaptive`、`display`）
+- **Responses 推理输出**：`reasoning` 类型输出项（含 `reasoning_text`）→ Chat `reasoning_content` 字段
+- **developer 角色降级**：目标后端不支持 `developer` 角色时自动降级为 `system`
 - **多模态**：图片（base64 / URL）、文档（PDF）、文件输入转换
 - **模型映射**：自定义模型名称映射表
 - **三种后端**：OpenAI Chat / OpenAI Responses / Anthropic
@@ -86,6 +88,12 @@ anthropic_resp = AnthropicConverter.from_openai_chat(chat_resp)
 # OpenAI Chat 响应 → Responses 格式
 responses_resp = OpenAIResponsesConverter.from_openai_chat(chat_resp)
 # → {"id": "...", "object": "response", "status": "completed", "output": [...], ...}
+
+# OpenAI Responses 响应 → Chat 格式
+responses_backend_resp = {"id": "...", "object": "response", "output": [...], "usage": {...}}
+chat_from_responses = OpenAIResponsesConverter.to_chat_response(responses_backend_resp)
+# → {"id": "...", "object": "chat.completion", "choices": [...], ...}
+# 注：Responses 中的 reasoning 输出项会转为 Chat 的 reasoning_content 字段
 ```
 
 ### 4. 使用引擎（推荐）
@@ -250,8 +258,8 @@ config = ConverterConfig(
 | Anthropic `thinking` | OpenAI Chat `reasoning_effort` |
 |----------------------|-------------------------------|
 | `{"type": "disabled"}` | `"none"` |
-| `{"type": "enabled", "budget_tokens": <1024}` | `"low"` |
-| `{"type": "enabled", "budget_tokens": 1024~31999}` | `"medium"` |
+| `{"type": "enabled", "budget_tokens": <10000}` | `"low"` |
+| `{"type": "enabled", "budget_tokens": 10000~31999}` | `"medium"` |
 | `{"type": "enabled", "budget_tokens": ≥32000}` | `"high"` |
 | `{"type": "adaptive", "budget_tokens": N}` | 按预算映射 |
 
@@ -272,7 +280,7 @@ config = ConverterConfig(
 | 类型标识 | `object: "chat.completion"` | `object: "response"` | `type: "message"` |
 | 内容 | `choices[].message.content` | `output[].content[]` | `content[]` |
 | 工具调用 | `choices[].message.tool_calls[]` | `output[].type=function_call` | `content[].type=tool_use` |
-| 扩展思考 | `choices[].message.reasoning_content` | — | `content[].type=thinking` |
+| 扩展思考 | `choices[].message.reasoning_content` | `output[].type=reasoning`（含 `reasoning_text`） | `content[].type=thinking` |
 | 停止原因 | `finish_reason: stop/length/tool_calls` | `status: completed/incomplete` | `stop_reason: end_turn/max_tokens/tool_use` |
 | 用量 | `usage.prompt_tokens` | `usage.input_tokens` | `usage.input_tokens` |
 
@@ -306,6 +314,7 @@ config = ConverterConfig(
 | `tool_result` | `{"role":"tool","tool_call_id","content"}` | `{"type":"function_call_output","call_id","output"}` |
 | `thinking` | `reasoning_content` | — |
 | `redacted_thinking` | （跳过） | — |
+| — | — | `reasoning`（含 `reasoning_text`）→ Chat `reasoning_content` |
 | `server_tool_use` | `tool_calls[...]` | — |
 
 ## 流式转换
@@ -387,23 +396,24 @@ protocol_converter_pkg/
 ├── tests/
 │   └── test_protocol_converter.py   # 72 个单元测试
 ├── examples/
-│   ├── integration_test.py                    # OpenAI Chat 后端集成测试
-│   ├── integration_test_anthropic_backend.py # Anthropic 后端集成测试
-│   ├── test_openai_responses.py              # OpenAI Responses 协议集成测试
-│   └── unified_test.py                       # 统一集成测试（三种后端模式）
+│   ├── integration_test_chat_backend.py       # OpenAI Chat 后端集成测试
+│   ├── integration_test_anthropic_backend.py  # Anthropic 后端集成测试
+│   ├── integration_test_responses_backend.py  # OpenAI Responses 后端集成测试
+│   └── integration_test_all_9_paths.py       # 3×3 全量 9 路集成测试
 └── pyproject.toml
 ```
 
 ## 运行测试
 
 ```bash
-# 单元测试
+# 单元测试（72 个）
 python -m pytest tests/ -v
 
-# 集成测试（需要配置 API Key）
-python examples/integration_test.py
-python examples/integration_test_anthropic_backend.py
-python examples/test_openai_responses.py
+# 集成测试（需要配置有效 API Key）
+python -m examples.integration_test_chat_backend        # Chat 后端 (8 项)
+python -m examples.integration_test_anthropic_backend    # Anthropic 后端 (7 项)
+python -m examples.integration_test_responses_backend    # Responses 后端 (7 项)
+python -m examples.integration_test_all_9_paths          # 3×3 全量 9 路测试
 ```
 
 ## 参考
