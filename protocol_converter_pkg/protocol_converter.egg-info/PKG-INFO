@@ -1,0 +1,27 @@
+Metadata-Version: 2.4
+Name: protocol-converter
+Version: 1.0.0
+Summary: Protocol converter supporting OpenAI Chat, OpenAI Responses, and Anthropic protocols
+Author: Protocol Converter Team
+License: MIT
+Project-URL: Homepage, https://github.com/example/protocol-converter
+Project-URL: Documentation, https://github.com/example/protocol-converter#readme
+Project-URL: Repository, https://github.com/example/protocol-converter
+Keywords: openai,anthropic,protocol,converter,llm,api
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Developers
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: httpx>=0.25.0
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0.0; extra == "dev"
+Requires-Dist: pytest-asyncio>=0.21.0; extra == "dev"
+Requires-Dist: pytest-cov>=4.0.0; extra == "dev"
+Requires-Dist: black>=23.0.0; extra == "dev"
+Requires-Dist: ruff>=0.1.0; extra == "dev"

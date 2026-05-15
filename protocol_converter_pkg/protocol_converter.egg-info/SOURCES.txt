@@ -1,0 +1,13 @@
+pyproject.toml
+protocol_converter/__init__.py
+protocol_converter/anthropic.py
+protocol_converter/engine.py
+protocol_converter/openai_chat.py
+protocol_converter/openai_responses.py
+protocol_converter/protocol_detector.py
+protocol_converter.egg-info/PKG-INFO
+protocol_converter.egg-info/SOURCES.txt
+protocol_converter.egg-info/dependency_links.txt
+protocol_converter.egg-info/requires.txt
+protocol_converter.egg-info/top_level.txt
+tests/test_protocol_converter.py
