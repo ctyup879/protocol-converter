@@ -9,28 +9,31 @@ OpenAI Responses API 请求参数:
 - input (必填): string | ResponseInputParam[] (文本/图片/文件输入)
 - instructions: 系统提示词
 - tools: 工具定义 (function | web_search | file_search | computer | mcp | code_interpreter | image_generation | local_shell | custom)
-- tool_choice: 工具选择策略 (auto | none | required | function | mcp | custom | apply_patch | shell)
+- tool_choice: 工具选择策略 (auto | none | required | function | mcp | custom | apply_patch | shell | allowed | types)
 - temperature: 温度 (0-2)
 - top_p: nucleus 采样
 - max_output_tokens: 最大输出 token 数
 - stream: 是否流式
+- stream_options: 流式选项 {"include_obfuscation": bool}
 - previous_response_id: 上一个响应 ID (用于多轮对话)
 - store: 是否存储响应
 - metadata: 元数据
-- reasoning: 推理配置 (o系列模型)
-- text: 文本输出配置 (structured outputs)
+- reasoning: 推理配置 (o系列模型, 含 effort + summary)
+- text: 文本输出配置 (structured outputs, 含 format)
 - parallel_tool_calls: 是否允许并行工具调用
 - truncation: 截断策略 ("auto" | "disabled")
-- service_tier: 服务层级
+- service_tier: 服务层级 ("auto" | "default" | "flex" | "scale" | "priority")
 - background: 是否后台运行
 - max_tool_calls: 最大工具调用次数
-- conversation: 对话参数
-- context_management: 上下文管理
+- conversation: 对话参数 (conversation ID 或 ConversationParam)
+- context_management: 上下文管理配置
 - include: 额外输出数据
 - prompt: 提示模板
 - safety_identifier: 安全标识符
 - prompt_cache_key: 缓存键
-- user: 用户标识符
+- prompt_cache_retention: 缓存保留策略 ("in_memory" | "24h")
+- user: 用户标识符 (被 safety_identifier/prompt_cache_key 替代)
+- top_logprobs: 返回 top logprobs 数量
 
 OpenAI Responses 输入项类型:
 - message: 消息 {"type": "message", "role", "content": [...]}
@@ -45,18 +48,20 @@ OpenAI Responses 输出项类型:
 - computer_call: 计算机调用
 - reasoning: 推理项
 
-OpenAI Responses 流式事件:
-- response.created
-- response.in_progress
-- response.output_item.added
-- response.content_part.added
-- response.output_text.delta
-- response.output_text.done
-- response.function_call_arguments.delta
-- response.function_call_arguments.done
-- response.output_item.done
-- response.completed
-- response.failed
+OpenAI Responses 流式事件 (严格顺序):
+  response.created -> response.in_progress -> [response.output_item.added -> [response.content_part.added -> response.output_text.delta* -> response.output_text.done -> response.content_part.done]? -> response.function_call_arguments.delta* -> response.function_call_arguments.done]? -> response.output_item.done]* -> response.completed | response.failed
+- response.created: 响应创建
+- response.in_progress: 响应进行中
+- response.output_item.added: 输出项添加
+- response.content_part.added: 内容部分添加
+- response.output_text.delta: 文本增量
+- response.output_text.done: 文本完成
+- response.content_part.done: 内容部分完成
+- response.function_call_arguments.delta: 函数调用参数增量
+- response.function_call_arguments.done: 函数调用参数完成
+- response.output_item.done: 输出项完成
+- response.completed: 响应完成
+- response.failed: 响应失败
 """
 
 import json
@@ -230,8 +235,12 @@ class OpenAIResponsesConverter:
             extra["safety_identifier"] = request["safety_identifier"]
         if request.get("prompt_cache_key"):
             extra["prompt_cache_key"] = request["prompt_cache_key"]
+        if request.get("prompt_cache_retention"):
+            extra["prompt_cache_retention"] = request["prompt_cache_retention"]
         if request.get("stream_options"):
             extra["stream_options"] = request["stream_options"]
+        if request.get("top_logprobs") is not None:
+            extra["top_logprobs"] = request["top_logprobs"]
         if extra:
             chat_request["extra_body"] = extra
         
@@ -667,6 +676,45 @@ class OpenAIResponsesConverter:
         if request.get("user"):
             responses_request["user"] = request["user"]
         
+        # safety_identifier
+        if request.get("safety_identifier"):
+            responses_request["safety_identifier"] = request["safety_identifier"]
+        
+        # prompt_cache_key
+        if request.get("prompt_cache_key"):
+            responses_request["prompt_cache_key"] = request["prompt_cache_key"]
+        
+        # prompt_cache_retention
+        if request.get("prompt_cache_retention"):
+            responses_request["prompt_cache_retention"] = request["prompt_cache_retention"]
+        
+        # top_logprobs
+        if request.get("top_logprobs") is not None:
+            responses_request["top_logprobs"] = request["top_logprobs"]
+        
+        # logprobs
+        if request.get("logprobs") is not None:
+            if "extra_body" not in responses_request:
+                responses_request["extra_body"] = {}
+            responses_request["extra_body"]["logprobs"] = request["logprobs"]
+        
+        # Chat API 特有参数（Responses API 不直接支持的）
+        extra = responses_request.get("extra_body", {})
+        if request.get("frequency_penalty") is not None:
+            extra["frequency_penalty"] = request["frequency_penalty"]
+        if request.get("presence_penalty") is not None:
+            extra["presence_penalty"] = request["presence_penalty"]
+        if request.get("logit_bias") is not None:
+            extra["logit_bias"] = request["logit_bias"]
+        if request.get("seed") is not None:
+            extra["seed"] = request["seed"]
+        if request.get("n") is not None and request["n"] != 1:
+            extra["n"] = request["n"]
+        if request.get("stop"):
+            extra["stop"] = request["stop"]
+        if extra:
+            responses_request["extra_body"] = extra
+        
         return responses_request
     
     @classmethod
@@ -843,6 +891,103 @@ class OpenAIResponsesConverter:
         return result
     
     # ================================================================
+    # 响应转换：Responses Response -> Chat Response
+    # ================================================================
+    
+    @classmethod
+    def to_chat_response(cls, response: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        OpenAI Responses 响应转换为 OpenAI Chat 响应格式
+        
+        Args:
+            response: OpenAI Responses 格式响应 (含 output, status, usage 等)
+            
+        Returns:
+            Dict: OpenAI Chat 格式响应
+        """
+        output = response.get("output", [])
+        message_content = None
+        tool_calls = []
+        reasoning_content = None
+        
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            item_type = item.get("type", "")
+            
+            if item_type == "message":
+                content_list = item.get("content", [])
+                texts = []
+                for c in content_list:
+                    if not isinstance(c, dict):
+                        continue
+                    c_type = c.get("type", "")
+                    if c_type in ("output_text", "text"):
+                        texts.append(c.get("text", ""))
+                    # reasoning_text 等非标准内容类型忽略
+                if texts:
+                    message_content = "\n".join(texts)
+            
+            elif item_type == "reasoning":
+                # reasoning 输出项 -> reasoning_content (OpenAI o系列格式)
+                reasoning_texts = []
+                for c in item.get("content", []):
+                    if isinstance(c, dict) and c.get("type") == "reasoning_text":
+                        reasoning_texts.append(c.get("text", ""))
+                if reasoning_texts:
+                    reasoning_content = "\n".join(reasoning_texts)
+            
+            elif item_type == "function_call":
+                tool_calls.append({
+                    "id": item.get("call_id", item.get("id", "")),
+                    "type": "function",
+                    "function": {
+                        "name": item.get("name", ""),
+                        "arguments": item.get("arguments", "{}")
+                    }
+                })
+        
+        # 映射状态
+        status = response.get("status", "completed")
+        finish_reason = "stop"
+        if status == "incomplete":
+            details = response.get("incomplete_details", {})
+            reason = details.get("reason", "") if details else ""
+            if reason == "max_output_tokens":
+                finish_reason = "length"
+            elif reason == "content_filter":
+                finish_reason = "content_filter"
+        
+        usage = response.get("usage", {})
+        
+        # 构建 message
+        message = {
+            "role": "assistant",
+            "content": message_content,
+        }
+        if reasoning_content is not None:
+            message["reasoning_content"] = reasoning_content
+        if tool_calls:
+            message["tool_calls"] = tool_calls
+        
+        return {
+            "id": response.get("id", f"chatcmpl-{uuid.uuid4().hex[:24]}"),
+            "object": "chat.completion",
+            "created": response.get("created_at", int(time.time())),
+            "model": response.get("model", ""),
+            "choices": [{
+                "index": 0,
+                "message": message,
+                "finish_reason": finish_reason
+            }],
+            "usage": {
+                "prompt_tokens": usage.get("input_tokens", 0),
+                "completion_tokens": usage.get("output_tokens", 0),
+                "total_tokens": usage.get("total_tokens", 0)
+            }
+        }
+    
+    # ================================================================
     # 响应转换：Anthropic -> Responses
     # ================================================================
     
@@ -858,37 +1003,57 @@ class OpenAIResponsesConverter:
     # 流式转换
     # ================================================================
     
+    # 流式状态跟踪
+    _stream_state = {
+        "message_item_started": False,
+        "content_part_started": False,
+        "started_function_ids": set(),
+        "output_index": 0,
+    }
+    
     @classmethod
-    def convert_stream_chunk(cls, chunk: Dict[str, Any]) -> Dict[str, Any]:
+    def reset_stream_state(cls):
+        """重置流式状态"""
+        cls._stream_state = {
+            "message_item_started": False,
+            "content_part_started": False,
+            "started_function_ids": set(),
+            "output_index": 0,
+        }
+    
+    @classmethod
+    def convert_stream_chunk(cls, chunk: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
-        转换 OpenAI Chat 流式块到 Responses 流式格式
+        转换 OpenAI Chat 流式块到 Responses 流式事件列表
         
-        Responses 流式事件（完整列表）:
-        - response.created: 响应创建
-        - response.in_progress: 响应进行中
-        - response.output_item.added: 输出项添加
-        - response.content_part.added: 内容部分添加
-        - response.output_text.delta: 文本增量
-        - response.output_text.done: 文本完成
-        - response.output_item.done: 输出项完成
-        - response.function_call_arguments.delta: 函数调用参数增量
-        - response.function_call_arguments.done: 函数调用参数完成
-        - response.completed: 响应完成
-        - response.failed: 响应失败
-        - response.ping: 心跳
+        Responses 流式事件严格顺序:
+        response.created -> response.in_progress -> 
+        [response.output_item.added -> 
+          [response.content_part.added -> response.output_text.delta* -> response.output_text.done -> response.content_part.done]?
+          [response.function_call_arguments.delta* -> response.function_call_arguments.done]?
+        -> response.output_item.done]* 
+        -> response.completed
+        
+        注意：一个 OpenAI chunk 可能需要生成多个 Responses 事件
+        
+        Returns:
+            List[Dict]: Responses 流式事件列表
         """
+        events = []
         choices = chunk.get("choices", [])
         
         if not choices:
-            return {"type": "response.ping"}
+            return [{"type": "response.ping"}]
         
         choice = choices[0]
         delta = choice.get("delta", {})
         finish_reason = choice.get("finish_reason")
         content = delta.get("content", "")
         
+        # 1. response.created + response.in_progress
         if delta.get("role") == "assistant":
-            return {
+            cls.reset_stream_state()
+            events.append({
                 "type": "response.created",
                 "response": {
                     "id": chunk.get("id", ""),
@@ -897,46 +1062,187 @@ class OpenAIResponsesConverter:
                     "model": chunk.get("model", ""),
                     "output": [],
                 }
-            }
+            })
+            events.append({
+                "type": "response.in_progress",
+                "response": {
+                    "id": chunk.get("id", ""),
+                    "object": "response",
+                    "status": "in_progress",
+                    "model": chunk.get("model", ""),
+                    "output": [],
+                }
+            })
+            return events
         
+        # 2. 文本内容
         if content:
-            return {
+            output_idx = cls._stream_state["output_index"]
+            
+            # 如果还没开始消息项，先发 output_item.added + content_part.added
+            if not cls._stream_state["message_item_started"]:
+                cls._stream_state["message_item_started"] = True
+                events.append({
+                    "type": "response.output_item.added",
+                    "output_index": output_idx,
+                    "item": {
+                        "type": "message",
+                        "id": f"msg_{uuid.uuid4().hex[:24]}",
+                        "status": "in_progress",
+                        "role": "assistant",
+                        "content": []
+                    }
+                })
+                events.append({
+                    "type": "response.content_part.added",
+                    "output_index": output_idx,
+                    "content_index": 0,
+                    "part": {
+                        "type": "output_text",
+                        "text": "",
+                        "annotations": []
+                    }
+                })
+                cls._stream_state["content_part_started"] = True
+            
+            # 文本增量
+            events.append({
                 "type": "response.output_text.delta",
+                "output_index": output_idx,
                 "content_index": 0,
-                "output_index": 0,
                 "delta": content
-            }
+            })
+            return events
         
+        # 3. 工具调用
         tool_calls = delta.get("tool_calls", [])
         if tool_calls:
-            tc = tool_calls[0]
-            tc_func = tc.get("function", {})
+            for tc in tool_calls:
+                tc_func = tc.get("function", {})
+                tc_id = tc.get("id", "")
+                tc_idx = tc.get("index", 0)
+                
+                # 如果有 id，是新的 function_call 开始
+                if tc_id and tc_id not in cls._stream_state["started_function_ids"]:
+                    # 关闭之前的消息项（如果有）
+                    if cls._stream_state["message_item_started"]:
+                        if cls._stream_state["content_part_started"]:
+                            events.append({
+                                "type": "response.output_text.done",
+                                "output_index": cls._stream_state["output_index"],
+                                "content_index": 0,
+                                "text": ""
+                            })
+                            events.append({
+                                "type": "response.content_part.done",
+                                "output_index": cls._stream_state["output_index"],
+                                "content_index": 0,
+                                "part": {
+                                    "type": "output_text",
+                                    "text": "",
+                                    "annotations": []
+                                }
+                            })
+                            cls._stream_state["content_part_started"] = False
+                        events.append({
+                            "type": "response.output_item.done",
+                            "output_index": cls._stream_state["output_index"],
+                            "item": {
+                                "type": "message",
+                                "id": f"msg_{uuid.uuid4().hex[:24]}",
+                                "status": "completed",
+                                "role": "assistant",
+                                "content": [{"type": "output_text", "text": "", "annotations": []}]
+                            }
+                        })
+                        cls._stream_state["message_item_started"] = False
+                        cls._stream_state["output_index"] += 1
+                    
+                    # 新的 function_call
+                    func_output_idx = cls._stream_state["output_index"]
+                    cls._stream_state["started_function_ids"].add(tc_id)
+                    cls._stream_state[f"_func_idx_{tc_id}"] = func_output_idx
+                    
+                    events.append({
+                        "type": "response.output_item.added",
+                        "output_index": func_output_idx,
+                        "item": {
+                            "type": "function_call",
+                            "id": tc_id,
+                            "call_id": tc_id,
+                            "name": tc_func.get("name", ""),
+                            "arguments": "",
+                            "status": "in_progress"
+                        }
+                    })
+                
+                # function_call_arguments delta
+                args_part = tc_func.get("arguments", "")
+                if args_part and tc_id:
+                    func_output_idx = cls._stream_state.get(f"_func_idx_{tc_id}", tc_idx)
+                    events.append({
+                        "type": "response.function_call_arguments.delta",
+                        "output_index": func_output_idx,
+                        "delta": args_part
+                    })
             
-            # 如果有 id，是 function_call 开始
-            if tc.get("id"):
-                return {
-                    "type": "response.output_item.added",
-                    "output_index": tc.get("index", 0),
+            return events
+        
+        # 4. 消息结束
+        if finish_reason:
+            output_idx = cls._stream_state["output_index"]
+            
+            # 关闭消息项
+            if cls._stream_state["message_item_started"]:
+                if cls._stream_state["content_part_started"]:
+                    events.append({
+                        "type": "response.output_text.done",
+                        "output_index": output_idx,
+                        "content_index": 0,
+                        "text": ""
+                    })
+                    events.append({
+                        "type": "response.content_part.done",
+                        "output_index": output_idx,
+                        "content_index": 0,
+                        "part": {
+                            "type": "output_text",
+                            "text": "",
+                            "annotations": []
+                        }
+                    })
+                events.append({
+                    "type": "response.output_item.done",
+                    "output_index": output_idx,
+                    "item": {
+                        "type": "message",
+                        "id": f"msg_{uuid.uuid4().hex[:24]}",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "", "annotations": []}]
+                    }
+                })
+            
+            # 关闭 function_call 项
+            for tc_id in cls._stream_state["started_function_ids"]:
+                func_output_idx = cls._stream_state.get(f"_func_idx_{tc_id}", 1)
+                events.append({
+                    "type": "response.function_call_arguments.done",
+                    "output_index": func_output_idx,
+                    "arguments": ""
+                })
+                events.append({
+                    "type": "response.output_item.done",
+                    "output_index": func_output_idx,
                     "item": {
                         "type": "function_call",
-                        "id": tc["id"],
-                        "call_id": tc["id"],
-                        "name": tc_func.get("name", ""),
-                        "arguments": "",
-                        "status": "in_progress"
+                        "id": tc_id,
+                        "call_id": tc_id,
+                        "status": "completed"
                     }
-                }
+                })
             
-            # 否则是 function_call_arguments delta
-            args_part = tc_func.get("arguments", "")
-            if args_part:
-                return {
-                    "type": "response.function_call_arguments.delta",
-                    "output_index": tc.get("index", 0),
-                    "delta": args_part
-                }
-        
-        if finish_reason:
+            # response.completed
             usage = chunk.get("usage", {})
             response_status = "completed"
             incomplete_details = None
@@ -965,6 +1271,7 @@ class OpenAIResponsesConverter:
             if incomplete_details:
                 result["response"]["incomplete_details"] = incomplete_details
             
-            return result
+            events.append(result)
+            return events
         
-        return {"type": "response.ping"}
+        return [{"type": "response.ping"}]

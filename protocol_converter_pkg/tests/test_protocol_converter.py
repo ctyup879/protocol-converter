@@ -921,3 +921,447 @@ class TestEngineBackendConversions:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestAnthropicStreamingSequence:
+    """Anthropic 流式事件序列测试"""
+
+    def setup_method(self):
+        """每次测试前重置流式状态"""
+        AnthropicConverter.reset_stream_state()
+
+    def test_message_start_event(self):
+        """测试 message_start 事件"""
+        chunk = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{
+                "delta": {"role": "assistant"},
+                "index": 0
+            }]
+        }
+        
+        events = AnthropicConverter.convert_stream_chunk(chunk)
+        
+        assert isinstance(events, list)
+        assert events[0]["type"] == "message_start"
+        assert events[0]["message"]["role"] == "assistant"
+        assert events[0]["message"]["stop_reason"] is None
+        assert "input_tokens" in events[0]["message"]["usage"]
+
+    def test_text_content_block_start(self):
+        """测试文本内容块先发 content_block_start"""
+        # 先发送 message_start
+        start_chunk = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{"delta": {"role": "assistant"}, "index": 0}]
+        }
+        AnthropicConverter.convert_stream_chunk(start_chunk)
+        
+        # 第一个文本 chunk 应该先发 content_block_start 再发 content_block_delta
+        text_chunk = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{
+                "delta": {"content": "Hello"},
+                "index": 0
+            }]
+        }
+        
+        events = AnthropicConverter.convert_stream_chunk(text_chunk)
+        
+        assert len(events) == 2
+        assert events[0]["type"] == "content_block_start"
+        assert events[0]["content_block"]["type"] == "text"
+        assert events[1]["type"] == "content_block_delta"
+        assert events[1]["delta"]["type"] == "text_delta"
+        assert events[1]["delta"]["text"] == "Hello"
+
+    def test_text_content_block_no_duplicate_start(self):
+        """测试后续文本 chunk 不再发 content_block_start"""
+        # 先发送 message_start
+        start_chunk = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{"delta": {"role": "assistant"}, "index": 0}]
+        }
+        AnthropicConverter.convert_stream_chunk(start_chunk)
+        
+        # 第一个文本 chunk
+        text_chunk1 = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{"delta": {"content": "Hello"}, "index": 0}]
+        }
+        events1 = AnthropicConverter.convert_stream_chunk(text_chunk1)
+        assert len(events1) == 2  # content_block_start + content_block_delta
+        
+        # 第二个文本 chunk
+        text_chunk2 = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{"delta": {"content": " world"}, "index": 0}]
+        }
+        events2 = AnthropicConverter.convert_stream_chunk(text_chunk2)
+        assert len(events2) == 1  # 只有 content_block_delta
+        assert events2[0]["type"] == "content_block_delta"
+
+    def test_content_block_stop_on_finish(self):
+        """测试 finish_reason 时关闭所有 content blocks"""
+        # 先发送 message_start
+        start_chunk = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{"delta": {"role": "assistant"}, "index": 0}]
+        }
+        AnthropicConverter.convert_stream_chunk(start_chunk)
+        
+        # 文本 chunk
+        text_chunk = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{"delta": {"content": "Hello"}, "index": 0}]
+        }
+        AnthropicConverter.convert_stream_chunk(text_chunk)
+        
+        # finish_reason chunk
+        finish_chunk = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{
+                "delta": {},
+                "finish_reason": "stop",
+                "index": 0
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5}
+        }
+        
+        events = AnthropicConverter.convert_stream_chunk(finish_chunk)
+        
+        # 应该包含: content_block_stop + message_delta
+        event_types = [e["type"] for e in events]
+        assert "content_block_stop" in event_types
+        assert "message_delta" in event_types
+        # message_delta 应该是最后一个事件
+        assert events[-1]["type"] == "message_delta"
+
+    def test_thinking_delta(self):
+        """测试 thinking 内容转换为 thinking_delta"""
+        start_chunk = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{"delta": {"role": "assistant"}, "index": 0}]
+        }
+        AnthropicConverter.convert_stream_chunk(start_chunk)
+        
+        thinking_chunk = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{
+                "delta": {"reasoning_content": "Let me think..."},
+                "index": 0
+            }]
+        }
+        
+        events = AnthropicConverter.convert_stream_chunk(thinking_chunk)
+        
+        # 应该有 content_block_start + content_block_delta
+        assert len(events) == 2
+        assert events[0]["type"] == "content_block_start"
+        assert events[0]["content_block"]["type"] == "thinking"
+        assert events[1]["type"] == "content_block_delta"
+        assert events[1]["delta"]["type"] == "thinking_delta"
+
+    def test_tool_use_content_block_start(self):
+        """测试 tool_use 的 content_block_start 事件"""
+        start_chunk = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{"delta": {"role": "assistant"}, "index": 0}]
+        }
+        AnthropicConverter.convert_stream_chunk(start_chunk)
+        
+        # 先发文本以开启文本块
+        text_chunk = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{"delta": {"content": "Let me check"}, "index": 0}]
+        }
+        AnthropicConverter.convert_stream_chunk(text_chunk)
+        
+        # tool_call 开始
+        tool_chunk = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "id": "call_123",
+                        "index": 0,
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": ""}
+                    }]
+                },
+                "index": 0
+            }]
+        }
+        
+        events = AnthropicConverter.convert_stream_chunk(tool_chunk)
+        
+        event_types = [e["type"] for e in events]
+        # 应该先关闭文本块，然后开启 tool_use 块
+        assert "content_block_stop" in event_types
+        assert "content_block_start" in event_types
+        
+        # 找到 content_block_start 事件
+        start_event = [e for e in events if e["type"] == "content_block_start"][0]
+        assert start_event["content_block"]["type"] == "tool_use"
+        assert start_event["content_block"]["id"] == "call_123"
+
+
+class TestResponsesStreamingSequence:
+    """Responses 流式事件序列测试"""
+
+    def setup_method(self):
+        """每次测试前重置流式状态"""
+        OpenAIResponsesConverter.reset_stream_state()
+
+    def test_response_created_and_in_progress(self):
+        """测试 response.created + response.in_progress 双事件"""
+        chunk = {
+            "id": "resp_123",
+            "model": "gpt-4o",
+            "choices": [{
+                "delta": {"role": "assistant"},
+                "index": 0
+            }]
+        }
+        
+        events = OpenAIResponsesConverter.convert_stream_chunk(chunk)
+        
+        assert isinstance(events, list)
+        assert len(events) == 2
+        assert events[0]["type"] == "response.created"
+        assert events[1]["type"] == "response.in_progress"
+
+    def test_text_delta_with_item_added(self):
+        """测试文本增量包含 output_item.added 和 content_part.added"""
+        # 先发 response.created
+        start_chunk = {
+            "id": "resp_123",
+            "model": "gpt-4o",
+            "choices": [{"delta": {"role": "assistant"}, "index": 0}]
+        }
+        OpenAIResponsesConverter.convert_stream_chunk(start_chunk)
+        
+        # 第一个文本 chunk
+        text_chunk = {
+            "id": "resp_123",
+            "model": "gpt-4o",
+            "choices": [{
+                "delta": {"content": "Hello"},
+                "index": 0
+            }]
+        }
+        
+        events = OpenAIResponsesConverter.convert_stream_chunk(text_chunk)
+        
+        event_types = [e["type"] for e in events]
+        assert "response.output_item.added" in event_types
+        assert "response.content_part.added" in event_types
+        assert "response.output_text.delta" in event_types
+
+    def test_function_call_events(self):
+        """测试 function_call 事件序列"""
+        # 先发 response.created
+        start_chunk = {
+            "id": "resp_123",
+            "model": "gpt-4o",
+            "choices": [{"delta": {"role": "assistant"}, "index": 0}]
+        }
+        OpenAIResponsesConverter.convert_stream_chunk(start_chunk)
+        
+        # function_call 开始
+        tool_chunk = {
+            "id": "resp_123",
+            "model": "gpt-4o",
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "id": "call_123",
+                        "index": 0,
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": ""}
+                    }]
+                },
+                "index": 0
+            }]
+        }
+        
+        events = OpenAIResponsesConverter.convert_stream_chunk(tool_chunk)
+        
+        event_types = [e["type"] for e in events]
+        assert "response.output_item.added" in event_types
+
+
+class TestAnthropicNewParams:
+    """Anthropic 新增参数测试"""
+
+    def test_inference_geo_param(self):
+        """测试 inference_geo 参数传递"""
+        request = {
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "inference_geo": "us"
+        }
+        
+        result = AnthropicConverter.to_openai_chat(request)
+        
+        assert "extra_body" in result
+        assert result["extra_body"]["inference_geo"] == "us"
+
+    def test_thinking_adaptive_type(self):
+        """测试 thinking adaptive 类型"""
+        request = {
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1024,
+            "thinking": {"type": "adaptive", "budget_tokens": 5000},
+            "messages": [{"role": "user", "content": "Hello"}]
+        }
+        
+        result = AnthropicConverter.to_openai_chat(request)
+        
+        assert "reasoning_effort" in result
+        # adaptive 应该映射到某个 reasoning_effort
+        assert result["reasoning_effort"] in ("low", "medium", "high")
+
+    def test_thinking_display_field(self):
+        """测试 thinking display 子字段保留"""
+        request = {
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1024,
+            "thinking": {"type": "enabled", "budget_tokens": 5000, "display": "omitted"},
+            "messages": [{"role": "user", "content": "Hello"}]
+        }
+        
+        result = AnthropicConverter.to_openai_chat(request)
+        
+        # display 字段应保留在 extra_body.thinking 中
+        assert "extra_body" in result
+        assert result["extra_body"]["thinking"]["display"] == "omitted"
+
+
+class TestEngineNewFeatures:
+    """引擎新功能测试"""
+
+    def test_anthropic_version_configurable(self):
+        """测试 Anthropic API 版本可配置"""
+        config = ConverterConfig(backend_type="anthropic", anthropic_version="2024-01-01")
+        assert config.get_auth_headers()["anthropic-version"] == "2024-01-01"
+
+    def test_inference_geo_config(self):
+        """测试 inference_geo 配置"""
+        config = ConverterConfig(backend_type="anthropic", inference_geo="eu")
+        engine = ProtocolConverterEngine(config)
+        
+        chat_request = {
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}]
+        }
+        
+        result = engine.convert_request(chat_request)
+        
+        assert result.get("inference_geo") == "eu"
+
+    def test_reasoning_effort_xhigh(self):
+        """测试 reasoning_effort xhigh 映射"""
+        config = ConverterConfig(backend_type="anthropic")
+        engine = ProtocolConverterEngine(config)
+        
+        chat_request = {
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "reasoning_effort": "xhigh"
+        }
+        
+        result = engine.convert_request(chat_request)
+        
+        assert "thinking" in result
+        assert result["thinking"]["budget_tokens"] == 64000
+
+    def test_reasoning_effort_minimal(self):
+        """测试 reasoning_effort minimal 映射"""
+        config = ConverterConfig(backend_type="anthropic")
+        engine = ProtocolConverterEngine(config)
+        
+        chat_request = {
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "reasoning_effort": "minimal"
+        }
+        
+        result = engine.convert_request(chat_request)
+        
+        assert "thinking" in result
+        assert result["thinking"]["type"] == "disabled"
+
+    def test_anthropic_response_with_thinking(self):
+        """测试 Anthropic 响应中 thinking 块转换为 reasoning_content"""
+        config = ConverterConfig(backend_type="anthropic")
+        engine = ProtocolConverterEngine(config)
+        
+        anthropic_response = {
+            "id": "msg_123",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "Let me analyze this..."},
+                {"type": "text", "text": "Here is my answer."}
+            ],
+            "model": "claude-sonnet-4-20250514",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        }
+        
+        result = engine.convert_response(anthropic_response, Protocol.OPENAI_CHAT)
+        
+        assert result["choices"][0]["message"]["reasoning_content"] == "Let me analyze this..."
+        assert result["choices"][0]["message"]["content"] == "Here is my answer."
+
+
+class TestProtocolDetectorNew:
+    """协议检测器新增测试"""
+
+    def test_detect_anthropic_with_inference_geo(self):
+        """测试带 inference_geo 的 Anthropic 请求检测"""
+        request = {
+            "model": "my-model",
+            "max_tokens": 1024,
+            "inference_geo": "us",
+            "messages": [{"role": "user", "content": "Hi"}]
+        }
+        assert ProtocolDetector.detect(request) == Protocol.ANTHROPIC
+
+    def test_detect_anthropic_with_tool_result_content(self):
+        """测试消息中包含 Anthropic 特有内容类型"""
+        request = {
+            "model": "my-model",
+            "max_tokens": 1024,
+            "messages": [{
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "result"}]
+            }]
+        }
+        assert ProtocolDetector.detect(request) == Protocol.ANTHROPIC
+
+    def test_detect_responses_with_function_call_input(self):
+        """测试带 function_call 输入类型的 Responses 请求检测"""
+        request = {
+            "model": "gpt-4o",
+            "input": [
+                {"type": "function_call", "call_id": "c1", "name": "test", "arguments": "{}"}
+            ]
+        }
+        assert ProtocolDetector.detect(request) == Protocol.OPENAI_RESPONSES

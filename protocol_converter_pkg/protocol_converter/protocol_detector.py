@@ -28,7 +28,7 @@ class ProtocolDetector:
     
     # OpenAI Responses API 特征
     OPENAI_RESPONSES_KEYS = {"model", "input", "max_output_tokens"}
-    OPENAI_RESPONSES_INPUT_TYPES = {"message", "text", "image"}
+    OPENAI_RESPONSES_INPUT_TYPES = {"message", "text", "image", "function_call", "function_call_output"}
     # Responses API 特有参数（Chat API 不存在这些参数）
     OPENAI_RESPONSES_SPECIFIC_KEYS = {
         "previous_response_id", "reasoning", "text", "truncation",
@@ -40,11 +40,15 @@ class ProtocolDetector:
     ANTHROPIC_KEYS = {"messages", "model", "max_tokens"}
     ANTHROPIC_ROLES = {"user", "assistant"}
     ANTHROPIC_CONTENT_TYPES = {"text", "tool_use", "tool_result", "thinking", "redacted_thinking", 
-                               "image", "document", "search_result", "server_tool_use"}
+                               "image", "document", "search_result", "server_tool_use",
+                               "web_search_tool_result", "web_fetch_tool_result",
+                               "code_execution_tool_result", "bash_code_execution_tool_result",
+                               "text_editor_code_execution_tool_result", "tool_search_tool_result",
+                               "container_upload"}
     # Anthropic 特有参数
     ANTHROPIC_SPECIFIC_KEYS = {
         "stop_sequences", "thinking", "cache_control", "top_k",
-        "container", "output_config",
+        "container", "output_config", "inference_geo",
     }
     
     @classmethod
@@ -121,6 +125,16 @@ class ProtocolDetector:
             return True
         if isinstance(tool_choice, dict) and tool_choice.get("type") == "tool":
             return True
+        
+        # 检查消息内容是否包含 Anthropic 特有的内容类型
+        for msg in messages[:5]:
+            content = msg.get("content")
+            if isinstance(content, list):
+                for block in content[:3]:
+                    if isinstance(block, dict):
+                        block_type = block.get("type", "")
+                        if block_type in cls.ANTHROPIC_CONTENT_TYPES:
+                            return True
         
         return False
     

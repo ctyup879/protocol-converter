@@ -6,27 +6,31 @@ Anthropic Messages API 协议转换器
 
 Anthropic Messages API 请求参数:
 - model (必填): 模型名称
-- max_tokens (必填): 最大生成 token 数
+- max_tokens (必填): 最大生成 token 数 (设为0仅预热缓存)
 - messages (必填): 消息列表
 - system: 系统提示词 (str | TextBlockParam[])
 - tools: 工具定义 (ToolUnionParam[])
-- tool_choice: 工具选择策略
+- tool_choice: 工具选择策略 ("auto" | "any" | "none" | {"type": "tool", "name": "..."})
 - temperature: 温度 (0.0-1.0, 默认 1.0)
 - top_p: nucleus 采样
 - top_k: Top-K 采样
 - stop_sequences: 停止序列
 - stream: 是否流式
 - thinking: 扩展思考配置
+  - {"type": "enabled", "budget_tokens": N, "display": "summarized"|"omitted"}
+  - {"type": "disabled"}
+  - {"type": "adaptive", "budget_tokens": N, "display": "summarized"|"omitted"}
 - metadata: 元数据 {"user_id": "..."}
-- cache_control: 缓存控制
+- cache_control: 缓存控制 (CacheControlEphemeralParam)
 - service_tier: 服务层级 ("auto" | "standard_only")
 - container: 容器标识
 - output_config: 输出配置
+- inference_geo: 推理地理区域
 
 Anthropic 消息内容块类型:
 - text: 文本
 - image: 图片 (source: base64 | url)
-- document: 文档 (PDF等)
+- document: 文档 (PDF等, source: base64 | url | text)
 - tool_use: 工具调用
 - tool_result: 工具结果
 - thinking: 扩展思考
@@ -35,20 +39,30 @@ Anthropic 消息内容块类型:
 - web_search_tool_result: 网页搜索结果
 - web_fetch_tool_result: 网页获取结果
 - code_execution_tool_result: 代码执行结果
+- bash_code_execution_tool_result: Bash代码执行结果
+- text_editor_code_execution_tool_result: 文本编辑器代码执行结果
+- tool_search_tool_result: 工具搜索结果
+- container_upload: 容器上传
 - search_result: 搜索结果
 
-Anthropic 流式事件类型:
-- message_start: 消息开始 (包含完整 message 对象)
-- content_block_start: 内容块开始
-- content_block_delta: 内容增量 (text_delta | input_json_delta | thinking_delta | citations_delta | signature_delta)
-- content_block_stop: 内容块结束
-- message_delta: 消息级增量 (stop_reason, stop_sequence, usage)
+Anthropic 流式事件类型 (严格顺序):
+  message_start -> [content_block_start -> content_block_delta* -> content_block_stop]* -> message_delta -> message_stop
+- message_start: 消息开始 (包含完整 message 对象含 usage)
+- content_block_start: 内容块开始 (含 index + content_block)
+- content_block_delta: 内容增量 (含 index + delta)
+  - text_delta: {type: "text_delta", text: "..."}
+  - input_json_delta: {type: "input_json_delta", partial_json: "..."}
+  - thinking_delta: {type: "thinking_delta", thinking: "..."}
+  - signature_delta: {type: "signature_delta", signature: "..."}
+  - citations_delta: {type: "citations_delta", citation: {...}}
+- content_block_stop: 内容块结束 (含 index)
+- message_delta: 消息级增量 (delta: stop_reason, stop_sequence, stop_details + usage: output_tokens)
 - message_stop: 消息结束
 - ping: 心跳
 - error: 错误
 
 Anthropic 响应字段:
-- id, type, role, content, model, stop_reason, stop_sequence, stop_details, usage
+- id, type, role, content, model, stop_reason, stop_sequence, stop_details, usage, container
 - usage: input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens,
          server_tool_use, service_tier, cache_creation, inference_geo
 
@@ -189,8 +203,15 @@ class AnthropicConverter:
         if thinking and isinstance(thinking, dict):
             thinking_type = thinking.get("type")
             if thinking_type == "enabled":
-                # 启用思考：使用 reasoning_effort (如果后端支持)
-                # OpenAI reasoning_effort: none, minimal, low, medium, high, xhigh
+                budget = thinking.get("budget_tokens", 0)
+                if budget >= 32000:
+                    chat_request["reasoning_effort"] = "high"
+                elif budget >= 10000:
+                    chat_request["reasoning_effort"] = "medium"
+                else:
+                    chat_request["reasoning_effort"] = "low"
+            elif thinking_type == "adaptive":
+                # adaptive 类型 - 类似 enabled 但模型自主决定是否思考
                 budget = thinking.get("budget_tokens", 0)
                 if budget >= 32000:
                     chat_request["reasoning_effort"] = "high"
@@ -205,7 +226,7 @@ class AnthropicConverter:
         extra = {}
         if request.get("top_k") is not None:
             extra["top_k"] = request["top_k"]
-        # thinking 参数也保留原始值以防后端需要
+        # thinking 参数保留原始值（含 display, adaptive 等子字段）以防后端需要
         if thinking and isinstance(thinking, dict):
             extra["thinking"] = thinking
         if request.get("cache_control") is not None:
@@ -214,6 +235,8 @@ class AnthropicConverter:
             extra["container"] = request["container"]
         if request.get("output_config") is not None:
             extra["output_config"] = request["output_config"]
+        if request.get("inference_geo") is not None:
+            extra["inference_geo"] = request["inference_geo"]
         if extra:
             chat_request["extra_body"] = extra
         
@@ -383,6 +406,31 @@ class AnthropicConverter:
                         "tool_use_id": block.get("tool_use_id", ""),
                         "content": block.get("content", ""),
                     })
+                
+                elif block_type == "bash_code_execution_tool_result":
+                    # Bash代码执行工具结果 - 转为工具结果
+                    tool_results.append({
+                        "tool_use_id": block.get("tool_use_id", ""),
+                        "content": block.get("content", ""),
+                    })
+                
+                elif block_type == "text_editor_code_execution_tool_result":
+                    # 文本编辑器代码执行工具结果 - 转为工具结果
+                    tool_results.append({
+                        "tool_use_id": block.get("tool_use_id", ""),
+                        "content": block.get("content", ""),
+                    })
+                
+                elif block_type == "tool_search_tool_result":
+                    # 工具搜索结果 - 转为工具结果
+                    tool_results.append({
+                        "tool_use_id": block.get("tool_use_id", ""),
+                        "content": block.get("content", ""),
+                    })
+                
+                elif block_type == "container_upload":
+                    # 容器上传块 - 转为文本表示
+                    text_parts.append(f"[Container upload: {block.get('id', '')}]")
             
             # 构建 assistant 消息（可能带 tool_calls）
             if role == "assistant":
@@ -574,6 +622,20 @@ class AnthropicConverter:
         # 转换 usage - 包含完整的 Anthropic usage 字段
         usage = response.get("usage", {})
         
+        anthropic_usage = {
+            "input_tokens": usage.get("prompt_tokens", 0),
+            "output_tokens": usage.get("completion_tokens", 0),
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+        }
+        
+        # 从 prompt_tokens_details 提取缓存信息
+        prompt_tokens_details = usage.get("prompt_tokens_details")
+        if isinstance(prompt_tokens_details, dict):
+            cached_tokens = prompt_tokens_details.get("cached_tokens", 0)
+            if cached_tokens:
+                anthropic_usage["cache_read_input_tokens"] = cached_tokens
+        
         return {
             "id": response.get("id", f"msg_{uuid.uuid4().hex[:24]}"),
             "type": "message",
@@ -583,12 +645,7 @@ class AnthropicConverter:
             "stop_reason": stop_reason,
             "stop_sequence": None,
             "stop_details": stop_details,
-            "usage": {
-                "input_tokens": usage.get("prompt_tokens", 0),
-                "output_tokens": usage.get("completion_tokens", 0),
-                "cache_creation_input_tokens": usage.get("prompt_tokens_details", {}).get("cached_tokens", 0) if isinstance(usage.get("prompt_tokens_details"), dict) else 0,
-                "cache_read_input_tokens": 0,
-            }
+            "usage": anthropic_usage
         }
     
     @classmethod
@@ -600,37 +657,53 @@ class AnthropicConverter:
     # 流式转换：OpenAI Chat Stream -> Anthropic SSE
     # ================================================================
     
+    # 流式状态跟踪（用于维护 content_block 索引和生命周期）
+    _stream_state = {
+        "text_block_started": False,
+        "text_block_index": 0,
+        "tool_block_index": 1,  # text 块默认 index 0, tool 块从 1 开始
+        "started_tool_ids": set(),  # 已发出 content_block_start 的 tool id
+    }
+    
     @classmethod
-    def convert_stream_chunk(cls, chunk: Dict[str, Any]) -> Dict[str, Any]:
+    def reset_stream_state(cls):
+        """重置流式状态（每次新流式请求开始时调用）"""
+        cls._stream_state = {
+            "text_block_started": False,
+            "text_block_index": 0,
+            "tool_block_index": 1,
+            "started_tool_ids": set(),
+        }
+    
+    @classmethod
+    def convert_stream_chunk(cls, chunk: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
-        转换 OpenAI Chat 流式块到 Anthropic SSE 格式
+        转换 OpenAI Chat 流式块到 Anthropic SSE 事件列表
         
-        Anthropic SSE 事件类型（严格按照官方 SDK 定义）:
-        - message_start: 包含完整 message 对象（id, type, role, model, usage）
-        - content_block_start: 新内容块开始 {"type": "text"|"tool_use", ...}
-        - content_block_delta: 内容增量 {"type": "text_delta"|"input_json_delta"|"thinking_delta", ...}
-        - content_block_stop: 内容块结束
-        - message_delta: 消息级增量 (stop_reason, stop_details, stop_sequence, usage)
-        - message_stop: 消息结束
-        - ping: 心跳
-        
-        注意：Anthropic 的流式事件需要严格按顺序：
+        Anthropic SSE 事件需要严格按顺序：
         message_start -> [content_block_start -> content_block_delta* -> content_block_stop]* -> message_delta -> message_stop
+        
+        注意：一个 OpenAI chunk 可能需要生成多个 Anthropic 事件
+        （例如：第一个文本 chunk 需要先发 content_block_start 再发 content_block_delta）
+        
+        Returns:
+            List[Dict]: Anthropic SSE 事件列表
         """
+        events = []
         choices = chunk.get("choices", [])
         
         if not choices:
-            return {"type": "ping"}
+            return [{"type": "ping"}]
         
         choice = choices[0]
         delta = choice.get("delta", {})
         finish_reason = choice.get("finish_reason")
         
-        # 判断事件类型
+        # 1. message_start 事件
         if delta.get("role") == "assistant":
-            # 第一个块 - message_start
+            cls.reset_stream_state()
             usage = chunk.get("usage", {})
-            return {
+            events.append({
                 "type": "message_start",
                 "message": {
                     "id": chunk.get("id", f"msg_{uuid.uuid4().hex[:24]}"),
@@ -648,74 +721,151 @@ class AnthropicConverter:
                         "cache_read_input_tokens": 0,
                     }
                 }
-            }
+            })
+            return events
         
-        # 处理 thinking/reasoning 内容（如果后端返回了 reasoning_token）
-        # OpenAI 在 stream_options.include_usage 时可能在 delta 中包含 reasoning
+        # 2. 处理 thinking/reasoning 内容
         reasoning_content = delta.get("reasoning_content")
         if reasoning_content is not None:
-            return {
+            # 如果还没开始 thinking 块，先发 content_block_start
+            thinking_key = "_thinking_block_started"
+            if not cls._stream_state.get(thinking_key):
+                cls._stream_state[thinking_key] = True
+                thinking_idx = cls._stream_state["text_block_index"]
+                cls._stream_state["tool_block_index"] = thinking_idx + 2
+                events.append({
+                    "type": "content_block_start",
+                    "index": thinking_idx,
+                    "content_block": {
+                        "type": "thinking",
+                        "thinking": ""
+                    }
+                })
+            events.append({
                 "type": "content_block_delta",
-                "index": 0,
+                "index": cls._stream_state["text_block_index"],
                 "delta": {
                     "type": "thinking_delta",
                     "thinking": reasoning_content
                 }
-            }
+            })
+            return events
         
+        # 3. 处理文本内容
         if delta.get("content") is not None and delta["content"] != "":
-            # 文本增量
-            return {
+            # 如果还没开始文本块，先发 content_block_start
+            if not cls._stream_state["text_block_started"]:
+                cls._stream_state["text_block_started"] = True
+                events.append({
+                    "type": "content_block_start",
+                    "index": cls._stream_state["text_block_index"],
+                    "content_block": {
+                        "type": "text",
+                        "text": ""
+                    }
+                })
+            events.append({
                 "type": "content_block_delta",
-                "index": 0,
+                "index": cls._stream_state["text_block_index"],
                 "delta": {
                     "type": "text_delta",
                     "text": delta["content"]
                 }
-            }
+            })
+            return events
         
+        # 4. 处理工具调用
         tool_calls = delta.get("tool_calls", [])
         if tool_calls:
-            tc = tool_calls[0]
-            tc_idx = tc.get("index", 0)
-            tc_func = tc.get("function", {})
+            for tc in tool_calls:
+                tc_idx_raw = tc.get("index", 0)
+                tc_func = tc.get("function", {})
+                tc_id = tc.get("id", "")
+                
+                # 如果有 id，是 tool_use 开始 -> content_block_start
+                if tc_id and tc_id not in cls._stream_state["started_tool_ids"]:
+                    # 如果文本块已开始但还没关闭，先关闭文本块
+                    if cls._stream_state["text_block_started"]:
+                        cls._stream_state["text_block_started"] = False
+                        events.append({
+                            "type": "content_block_stop",
+                            "index": cls._stream_state["text_block_index"]
+                        })
+                    
+                    # 如果有 thinking 块已开始，先关闭它
+                    thinking_key = "_thinking_block_started"
+                    if cls._stream_state.get(thinking_key):
+                        cls._stream_state[thinking_key] = False
+                        events.append({
+                            "type": "content_block_stop",
+                            "index": cls._stream_state["text_block_index"]
+                        })
+                    
+                    # 计算此 tool 块的索引
+                    tool_idx = cls._stream_state["tool_block_index"]
+                    cls._stream_state["started_tool_ids"].add(tc_id)
+                    cls._stream_state[f"_tool_idx_{tc_id}"] = tool_idx
+                    cls._stream_state["tool_block_index"] = tool_idx + 1
+                    
+                    events.append({
+                        "type": "content_block_start",
+                        "index": tool_idx,
+                        "content_block": {
+                            "type": "tool_use",
+                            "id": tc_id,
+                            "name": tc_func.get("name", ""),
+                            "input": {}
+                        }
+                    })
+                
+                # input_json_delta -> content_block_delta
+                args_part = tc_func.get("arguments", "")
+                if args_part and tc_id:
+                    tool_idx = cls._stream_state.get(f"_tool_idx_{tc_id}", tc_idx_raw + 1)
+                    events.append({
+                        "type": "content_block_delta",
+                        "index": tool_idx,
+                        "delta": {
+                            "type": "input_json_delta",
+                            "partial_json": args_part
+                        }
+                    })
             
-            # 如果有 id 和 name，是 tool_use 开始 -> content_block_start
-            if tc.get("id"):
-                return {
-                    "type": "content_block_start",
-                    "index": tc_idx + 1,  # +1 因为 text 通常是 index 0
-                    "content_block": {
-                        "type": "tool_use",
-                        "id": tc["id"],
-                        "name": tc_func.get("name", ""),
-                        "input": {}
-                    }
-                }
-            
-            # 否则是 input_json_delta -> content_block_delta
-            args_part = tc_func.get("arguments", "")
-            if args_part:
-                return {
-                    "type": "content_block_delta",
-                    "index": tc_idx + 1,
-                    "delta": {
-                        "type": "input_json_delta",
-                        "partial_json": args_part
-                    }
-                }
+            return events
         
+        # 5. 消息结束
         if finish_reason:
-            # 消息结束 -> message_delta
+            # 关闭所有未关闭的 content blocks
+            if cls._stream_state["text_block_started"]:
+                events.append({
+                    "type": "content_block_stop",
+                    "index": cls._stream_state["text_block_index"]
+                })
+            
+            thinking_key = "_thinking_block_started"
+            if cls._stream_state.get(thinking_key):
+                events.append({
+                    "type": "content_block_stop",
+                    "index": cls._stream_state["text_block_index"]
+                })
+            
+            # 关闭所有 tool blocks
+            for tc_id in cls._stream_state["started_tool_ids"]:
+                tool_idx = cls._stream_state.get(f"_tool_idx_{tc_id}", 1)
+                events.append({
+                    "type": "content_block_stop",
+                    "index": tool_idx
+                })
+            
+            # message_delta
             usage = chunk.get("usage", {})
             stop_reason = cls._map_stop_reason(finish_reason)
             
-            # 构建 stop_details
             stop_details = None
             if stop_reason == "refusal":
                 stop_details = {"reason": "content_policy"}
             
-            return {
+            events.append({
                 "type": "message_delta",
                 "delta": {
                     "stop_reason": stop_reason,
@@ -725,9 +875,11 @@ class AnthropicConverter:
                 "usage": {
                     "output_tokens": usage.get("completion_tokens", 0)
                 }
-            }
+            })
+            
+            return events
         
-        return {"type": "ping"}
+        return [{"type": "ping"}]
     
     # ================================================================
     # 响应转换：Anthropic -> OpenAI Responses

@@ -59,6 +59,19 @@ class ConverterConfig:
     # 模型映射表：模型名 -> 目标后端模型名
     model_mapping: Dict[str, str] = field(default_factory=dict)
     
+    # Anthropic 特有配置
+    # 推理地理区域 (Anthropic inference_geo 参数)
+    inference_geo: Optional[str] = None
+    
+    # Anthropic API 版本
+    anthropic_version: str = "2023-06-01"
+    
+    # OpenAI 特有配置
+    # 提示缓存键 (替代 user 字段)
+    prompt_cache_key: Optional[str] = None
+    # 提示缓存保留策略 ("in_memory" | "24h")
+    prompt_cache_retention: Optional[str] = None
+    
     def get_model(self, model: str) -> str:
         """获取映射后的模型名"""
         return self.model_mapping.get(model, model)
@@ -68,7 +81,7 @@ class ConverterConfig:
         if self.backend_type == "anthropic":
             return {
                 "x-api-key": self.api_key or "",
-                "anthropic-version": "2023-06-01"
+                "anthropic-version": self.anthropic_version
             }
         else:
             # openai 和 openai_responses 均使用 Bearer 认证
@@ -129,6 +142,7 @@ class ProtocolConverterEngine:
         self.openai_chat = OpenAIChatConverter()
         self.openai_responses = OpenAIResponsesConverter()
         self.anthropic = AnthropicConverter()
+        self._pending_events: List[Dict[str, Any]] = []
     
     def detect_protocol(self, request: Dict[str, Any]) -> Protocol:
         """
@@ -239,8 +253,8 @@ class ProtocolConverterEngine:
             role = msg.get("role", "user")
             content = msg.get("content", "")
             
-            if role == "system":
-                # system 消息提取为顶级 system 参数
+            if role == "system" or role == "developer":
+                # system / developer 消息提取为顶级 system 参数
                 if isinstance(content, str):
                     system_prompt = content
                 elif isinstance(content, list):
@@ -392,13 +406,18 @@ class ProtocolConverterEngine:
         if reasoning_effort:
             effort_budget_map = {
                 "none": 0,
+                "minimal": 0,
                 "low": 1024,
                 "medium": 10000,
                 "high": 32000,
+                "xhigh": 64000,
             }
             budget = effort_budget_map.get(reasoning_effort, 10000)
             if budget > 0:
-                anthropic_request["thinking"] = {"type": "enabled", "budget_tokens": budget}
+                anthropic_request["thinking"] = {
+                    "type": "enabled",
+                    "budget_tokens": budget,
+                }
             else:
                 anthropic_request["thinking"] = {"type": "disabled"}
         
@@ -407,6 +426,11 @@ class ProtocolConverterEngine:
         if service_tier:
             tier_map = {"default": "standard_only", "auto": "auto"}
             anthropic_request["service_tier"] = tier_map.get(service_tier, service_tier)
+        
+        # inference_geo (Anthropic 特有)
+        inference_geo = request.get("inference_geo") or self.config.inference_geo
+        if inference_geo:
+            anthropic_request["inference_geo"] = inference_geo
         
         return anthropic_request
     
@@ -464,10 +488,14 @@ class ProtocolConverterEngine:
         content = response.get("content", [])
         message_content = None
         tool_calls = []
+        reasoning_content = None
         
         for block in content:
             if block.get("type") == "text":
                 message_content = block.get("text", "")
+            elif block.get("type") == "thinking":
+                # thinking 块 -> reasoning_content (OpenAI o系列格式)
+                reasoning_content = block.get("thinking", "")
             elif block.get("type") == "tool_use":
                 tool_calls.append({
                     "id": block.get("id", f"call_{uuid.uuid4().hex[:24]}"),
@@ -492,6 +520,16 @@ class ProtocolConverterEngine:
         
         usage = response.get("usage", {})
         
+        # 构建 message
+        message = {
+            "role": "assistant",
+            "content": message_content,
+        }
+        if reasoning_content is not None:
+            message["reasoning_content"] = reasoning_content
+        if tool_calls:
+            message["tool_calls"] = tool_calls
+        
         return {
             "id": response.get("id", f"chatcmpl-{uuid.uuid4().hex[:24]}"),
             "object": "chat.completion",
@@ -499,11 +537,7 @@ class ProtocolConverterEngine:
             "model": response.get("model", ""),
             "choices": [{
                 "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": message_content,
-                    **({"tool_calls": tool_calls} if tool_calls else {}),
-                },
+                "message": message,
                 "finish_reason": finish_reason
             }],
             "usage": {
@@ -515,66 +549,7 @@ class ProtocolConverterEngine:
     
     def _responses_to_chat_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
         """将 OpenAI Responses 响应转换为 OpenAI Chat 响应"""
-        output = response.get("output", [])
-        message_content = None
-        tool_calls = []
-        
-        for item in output:
-            if not isinstance(item, dict):
-                continue
-            item_type = item.get("type", "")
-            
-            if item_type == "message":
-                content_list = item.get("content", [])
-                texts = []
-                for c in content_list:
-                    if isinstance(c, dict) and c.get("type") in ("output_text", "text"):
-                        texts.append(c.get("text", ""))
-                message_content = "\n".join(texts) if texts else None
-            
-            elif item_type == "function_call":
-                tool_calls.append({
-                    "id": item.get("call_id", item.get("id", "")),
-                    "type": "function",
-                    "function": {
-                        "name": item.get("name", ""),
-                        "arguments": item.get("arguments", "{}")
-                    }
-                })
-        
-        # 映射状态
-        status = response.get("status", "completed")
-        finish_reason = "stop"
-        if status == "incomplete":
-            details = response.get("incomplete_details", {})
-            reason = details.get("reason", "") if details else ""
-            if reason == "max_output_tokens":
-                finish_reason = "length"
-            elif reason == "content_filter":
-                finish_reason = "content_filter"
-        
-        usage = response.get("usage", {})
-        
-        return {
-            "id": response.get("id", f"chatcmpl-{uuid.uuid4().hex[:24]}"),
-            "object": "chat.completion",
-            "created": int(time.time()),
-            "model": response.get("model", ""),
-            "choices": [{
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": message_content,
-                    **({"tool_calls": tool_calls} if tool_calls else {}),
-                },
-                "finish_reason": finish_reason
-            }],
-            "usage": {
-                "prompt_tokens": usage.get("input_tokens", 0),
-                "completion_tokens": usage.get("output_tokens", 0),
-                "total_tokens": usage.get("total_tokens", 0)
-            }
-        }
+        return self.openai_responses.to_chat_response(response)
     
     def convert_stream_chunk(
         self,
@@ -592,10 +567,19 @@ class ProtocolConverterEngine:
             StreamChunk: 转换后的块
         """
         if target_protocol == Protocol.ANTHROPIC:
-            data = self.anthropic.convert_stream_chunk(chunk)
-            # 确定事件类型
-            event = data.get("type", "content_block_delta")
-            return StreamChunk(event=event, data=data)
+            # Anthropic 流式转换可能返回多个事件
+            data_list = self.anthropic.convert_stream_chunk(chunk)
+            if isinstance(data_list, list) and len(data_list) > 0:
+                # 返回第一个事件，后续事件需要通过 convert_stream_chunk_multi 获取
+                data = data_list[0]
+                event = data.get("type", "content_block_delta")
+                # 存储额外事件供后续处理
+                self._pending_events = data_list[1:] if len(data_list) > 1 else []
+                return StreamChunk(event=event, data=data)
+            elif isinstance(data_list, dict):
+                event = data_list.get("type", "content_block_delta")
+                return StreamChunk(event=event, data=data_list)
+            return StreamChunk(event="ping", data={"type": "ping"})
         
         elif target_protocol == Protocol.OPENAI_RESPONSES:
             data = self.openai_responses.convert_stream_chunk(chunk)
@@ -615,6 +599,48 @@ class ProtocolConverterEngine:
                     event = "message_delta"
             
             return StreamChunk(event=event, data=chunk)
+    
+    def convert_stream_chunk_multi(
+        self,
+        chunk: Dict[str, Any],
+        target_protocol: Protocol
+    ) -> List[StreamChunk]:
+        """
+        转换流式响应块，返回所有事件（支持一对多映射）
+        
+        Args:
+            chunk: 后端流式块
+            target_protocol: 目标协议
+            
+        Returns:
+            List[StreamChunk]: 转换后的所有事件块
+        """
+        if target_protocol == Protocol.ANTHROPIC:
+            data_list = self.anthropic.convert_stream_chunk(chunk)
+            if isinstance(data_list, list):
+                return [
+                    StreamChunk(event=d.get("type", "content_block_delta"), data=d)
+                    for d in data_list
+                ]
+            elif isinstance(data_list, dict):
+                event = data_list.get("type", "content_block_delta")
+                return [StreamChunk(event=event, data=data_list)]
+            return [StreamChunk(event="ping", data={"type": "ping"})]
+        
+        elif target_protocol == Protocol.OPENAI_RESPONSES:
+            data_list = self.openai_responses.convert_stream_chunk(chunk)
+            if isinstance(data_list, list):
+                return [
+                    StreamChunk(event=d.get("type", "response.output_text.delta"), data=d)
+                    for d in data_list
+                ]
+            data = data_list
+            event = data.get("type", "response.output_text.delta")
+            return [StreamChunk(event=event, data=data)]
+        
+        else:
+            # OpenAI Chat - 1:1 映射
+            return [self.convert_stream_chunk(chunk, target_protocol)]
     
     async def convert_and_forward(
         self,
@@ -698,6 +724,10 @@ class ProtocolConverterEngine:
         if backend_format == "openai_chat" and "stream_options" not in chat_request:
             chat_request["stream_options"] = {"include_usage": True}
         
+        # 对于 Anthropic 后端，重置流式状态
+        if backend_format == "anthropic":
+            self.anthropic.reset_stream_state()
+        
         # 发起流式请求
         response = await http_client(
             url=self.config.backend_url,
@@ -727,15 +757,17 @@ class ProtocolConverterEngine:
                 
                 try:
                     chunk = json.loads(data_str)
-                    stream_chunk = self.convert_stream_chunk(chunk, source_protocol)
+                    # 使用多事件转换，以支持 Anthropic 的一对多映射
+                    stream_chunks = self.convert_stream_chunk_multi(chunk, source_protocol)
                     
                     # 根据目标协议选择输出格式
-                    if source_protocol == Protocol.ANTHROPIC:
-                        yield stream_chunk.to_anthropic_sse()
-                    elif source_protocol == Protocol.OPENAI_RESPONSES:
-                        yield stream_chunk.to_sse()
-                    else:
-                        yield stream_chunk.to_openai_chunk()
+                    for sc in stream_chunks:
+                        if source_protocol == Protocol.ANTHROPIC:
+                            yield sc.to_anthropic_sse()
+                        elif source_protocol == Protocol.OPENAI_RESPONSES:
+                            yield sc.to_sse()
+                        else:
+                            yield sc.to_openai_chunk()
                 except json.JSONDecodeError:
                     continue
 

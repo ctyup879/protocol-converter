@@ -24,7 +24,7 @@ OpenAI Chat Completions API 请求参数:
 - logit_bias: token 偏置
 - logprobs: 是否返回 logprobs
 - top_logprobs: 返回的 top logprobs 数量 (0-20)
-- user: 用户标识符
+- user: 用户标识符 (被 safety_identifier/prompt_cache_key 替代)
 - store: 是否存储
 - reasoning_effort: 推理努力 (none, minimal, low, medium, high, xhigh)
 - parallel_tool_calls: 是否允许并行工具调用
@@ -37,6 +37,7 @@ OpenAI Chat Completions API 请求参数:
 - verbosity: 输出详细程度 (low, medium, high)
 - safety_identifier: 安全标识符
 - prompt_cache_key: 缓存键
+- prompt_cache_retention: 缓存保留策略 ("in_memory" | "24h")
 """
 
 import json
@@ -81,6 +82,7 @@ class ChatCompletionRequest:
     verbosity: Optional[str] = None
     safety_identifier: Optional[str] = None
     prompt_cache_key: Optional[str] = None
+    prompt_cache_retention: Optional[str] = None
 
 
 @dataclass
@@ -178,6 +180,7 @@ class OpenAIChatConverter:
             verbosity=request.get("verbosity"),
             safety_identifier=request.get("safety_identifier"),
             prompt_cache_key=request.get("prompt_cache_key"),
+            prompt_cache_retention=request.get("prompt_cache_retention"),
         )
     
     @classmethod
