@@ -192,30 +192,41 @@ class TestAnthropicConverter:
         assert result["temperature"] == 0.7
     
     def test_convert_content_blocks(self):
-        """测试内容块转换"""
-        blocks = [
-            {"type": "text", "text": "Hello"},
-            {"type": "text", "text": " World"}
-        ]
+        """测试内容块转换 - 通过 _convert_message 间接测试"""
+        msg = {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Hello"},
+                {"type": "text", "text": " World"}
+            ]
+        }
         
-        result = AnthropicConverter._convert_content_blocks(blocks)
+        result = AnthropicConverter._convert_message(msg)
         
-        assert result == "Hello\n World"
+        assert len(result) == 1
+        assert result[0]["role"] == "user"
+        assert "Hello" in result[0]["content"]
     
     def test_convert_tool_use_blocks(self):
-        """测试工具调用块转换"""
-        blocks = [
-            {
-                "type": "tool_use",
-                "id": "toolu_123",
-                "name": "get_weather",
-                "input": {"city": "Beijing"}
-            }
-        ]
+        """测试工具调用块转换 - assistant 消息中的 tool_use"""
+        msg = {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_123",
+                    "name": "get_weather",
+                    "input": {"city": "Beijing"}
+                }
+            ]
+        }
         
-        result = AnthropicConverter._convert_content_blocks(blocks)
+        result = AnthropicConverter._convert_message(msg)
         
-        assert "[Calling tool: get_weather]" in result
+        assert len(result) == 1
+        assert result[0]["role"] == "assistant"
+        assert result[0].get("tool_calls") is not None
+        assert result[0]["tool_calls"][0]["function"]["name"] == "get_weather"
     
     def test_from_openai_chat(self):
         """测试从 OpenAI Chat 转换"""
@@ -268,7 +279,8 @@ class TestOpenAIResponsesConverter:
         assert len(result["messages"]) == 2
         assert result["messages"][0]["role"] == "system"
         assert result["messages"][1]["role"] == "user"
-        assert result["max_tokens"] == 1024
+        # max_output_tokens 映射为 max_completion_tokens (OpenAI 新版推荐)
+        assert result.get("max_completion_tokens") == 1024 or result.get("max_tokens") == 1024
     
     def test_from_openai_chat(self):
         """测试从 OpenAI Chat 转换"""

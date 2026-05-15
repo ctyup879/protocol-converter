@@ -106,14 +106,23 @@ class ProtocolDetector:
         """检查是否为 OpenAI Responses API"""
         # Responses API 使用 input 而不是 messages
         if "input" in keys and "model" in keys:
-            input_data = request.get("input", [])
+            input_data = request.get("input")
+            # input 可以是字符串
+            if isinstance(input_data, str):
+                return True
+            # input 也可以是数组
             if isinstance(input_data, list) and len(input_data) > 0:
                 first_item = input_data[0]
                 if isinstance(first_item, dict) and first_item.get("type") in cls.OPENAI_RESPONSES_INPUT_TYPES:
                     return True
         
-        # 检查是否有 response 输出相关的结构
-        if "instructions" in keys and "tools" in keys:
+        # 有 instructions 或 max_output_tokens 强烈暗示 Responses API
+        if "instructions" in keys and "messages" not in keys:
+            return True
+        if "max_output_tokens" in keys and "messages" not in keys:
+            return True
+        # previous_response_id 是 Responses API 特有
+        if "previous_response_id" in keys:
             return True
         
         return False
