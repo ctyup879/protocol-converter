@@ -259,6 +259,9 @@ class OpenAIResponsesConverter:
                     }
                 elif fmt_type == "json_object":
                     chat_request["response_format"] = {"type": "json_object"}
+                elif fmt_type == "text":
+                    # Responses API text format type -> Chat ResponseFormatText
+                    chat_request["response_format"] = {"type": "text"}
         
         # 10. 处理 service_tier
         if request.get("service_tier"):
@@ -740,6 +743,9 @@ class OpenAIResponsesConverter:
                 }
             elif fmt_type == "json_object":
                 responses_request["text"] = {"format": {"type": "json_object"}}
+            elif fmt_type == "text":
+                # Chat API 新增 ResponseFormatText 类型
+                responses_request["text"] = {"format": {"type": "text"}}
         
         # service_tier
         if request.get("service_tier"):
@@ -760,6 +766,11 @@ class OpenAIResponsesConverter:
         # prompt_cache_retention
         if request.get("prompt_cache_retention"):
             responses_request["prompt_cache_retention"] = request["prompt_cache_retention"]
+        
+        # verbosity (Chat API 新增参数)
+        if request.get("verbosity"):
+            responses_request["extra_body"] = responses_request.get("extra_body", {})
+            responses_request["extra_body"]["verbosity"] = request["verbosity"]
         
         # top_logprobs
         if request.get("top_logprobs") is not None:
@@ -924,11 +935,15 @@ class OpenAIResponsesConverter:
             # 处理文本内容
             if content:
                 msg_content = []
-                msg_content.append({
+                output_text_item = {
                     "type": "output_text",
                     "text": content,
-                    "annotations": message.get("annotations", [])
-                })
+                }
+                # 保留 annotations（Chat message.annotations -> Responses output_text.annotations）
+                annotations = message.get("annotations", [])
+                if annotations:
+                    output_text_item["annotations"] = annotations
+                msg_content.append(output_text_item)
                 
                 output.append({
                     "type": "message",
@@ -980,6 +995,7 @@ class OpenAIResponsesConverter:
             "object": "response",
             "status": status,
             "created_at": response.get("created", int(time.time())),
+            "completed_at": int(time.time()) if status == "completed" else None,
             "model": response.get("model", ""),
             "output": output,
             "usage": response_usage,
@@ -1019,6 +1035,7 @@ class OpenAIResponsesConverter:
         """
         output = response.get("output", [])
         message_content = None
+        message_annotations = None
         tool_calls = []
         reasoning_content = None
         
@@ -1030,15 +1047,20 @@ class OpenAIResponsesConverter:
             if item_type == "message":
                 content_list = item.get("content", [])
                 texts = []
+                all_annotations = []
                 for c in content_list:
                     if not isinstance(c, dict):
                         continue
                     c_type = c.get("type", "")
                     if c_type in ("output_text", "text"):
                         texts.append(c.get("text", ""))
-                    # reasoning_text 等非标准内容类型忽略
+                        # 保留 annotations
+                        if c.get("annotations"):
+                            all_annotations.extend(c["annotations"])
                 if texts:
                     message_content = "\n".join(texts)
+                if all_annotations:
+                    message_annotations = all_annotations
             
             elif item_type == "reasoning":
                 # reasoning 输出项 -> reasoning_content (OpenAI o系列格式)
@@ -1193,8 +1215,11 @@ class OpenAIResponsesConverter:
             message["reasoning_content"] = reasoning_content
         if tool_calls:
             message["tool_calls"] = tool_calls
+        # 保留 annotations（Responses output_text.annotations -> Chat message.annotations）
+        if message_annotations is not None:
+            message["annotations"] = message_annotations
         
-        return {
+        result = {
             "id": response.get("id", f"chatcmpl-{uuid.uuid4().hex[:24]}"),
             "object": "chat.completion",
             "created": response.get("created_at", int(time.time())),
@@ -1206,6 +1231,14 @@ class OpenAIResponsesConverter:
             }],
             "usage": chat_usage
         }
+        
+        # 添加可选字段
+        if response.get("service_tier"):
+            result["service_tier"] = response["service_tier"]
+        if response.get("system_fingerprint"):
+            result["system_fingerprint"] = response["system_fingerprint"]
+        
+        return result
     
     # ================================================================
     # 响应转换：Anthropic -> Responses

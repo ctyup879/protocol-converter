@@ -237,14 +237,20 @@ class AnthropicConverter:
                 else:
                     chat_request["reasoning_effort"] = "low"
             elif thinking_type == "adaptive":
-                # adaptive 类型 - 类似 enabled 但模型自主决定是否思考
-                budget = thinking.get("budget_tokens", 0)
-                if budget >= 32000:
-                    chat_request["reasoning_effort"] = "high"
-                elif budget >= 10000:
-                    chat_request["reasoning_effort"] = "medium"
+                # adaptive 类型 - 模型自主决定是否思考，无 budget_tokens 字段
+                # 参考 SDK: ThinkingConfigAdaptiveParam 仅有 type + display，无 budget_tokens
+                # 对于 adaptive，模型自行决定推理深度，映射为 "medium"（o系列模型默认值）
+                budget = thinking.get("budget_tokens")
+                if budget is not None:
+                    if budget >= 32000:
+                        chat_request["reasoning_effort"] = "high"
+                    elif budget >= 10000:
+                        chat_request["reasoning_effort"] = "medium"
+                    else:
+                        chat_request["reasoning_effort"] = "low"
                 else:
-                    chat_request["reasoning_effort"] = "low"
+                    # adaptive 无 budget_tokens，默认 medium
+                    chat_request["reasoning_effort"] = "medium"
             elif thinking_type == "disabled":
                 chat_request["reasoning_effort"] = "none"
         
@@ -336,7 +342,11 @@ class AnthropicConverter:
                 
                 if block_type == "text":
                     text_parts.append(block.get("text", ""))
-                    content_parts.append({"type": "text", "text": block.get("text", "")})
+                    text_part = {"type": "text", "text": block.get("text", "")}
+                    # 保留 citations 字段（Anthropic SDK TextBlock 支持 citations）
+                    if block.get("citations"):
+                        text_part["citations"] = block["citations"]
+                    content_parts.append(text_part)
                 
                 elif block_type == "tool_use":
                     # assistant 消息中的工具调用
@@ -351,6 +361,7 @@ class AnthropicConverter:
                 
                 elif block_type == "tool_result":
                     # user 消息中的工具结果
+                    # Anthropic tool_result 支持 is_error 字段
                     tool_results.append(block)
                 
                 elif block_type == "thinking":
@@ -509,6 +520,9 @@ class AnthropicConverter:
                         tool_msg["content"] = "\n".join(text_list) if text_list else ""
                     else:
                         tool_msg["content"] = str(tr_content)
+                    # 保留 is_error 标记（Chat API 无直接等价，用 content 前缀标记）
+                    if tr.get("is_error"):
+                        tool_msg["content"] = f"[Error] {tool_msg['content']}"
                     result.append(tool_msg)
         
         else:
@@ -698,6 +712,10 @@ class AnthropicConverter:
             cached_tokens = prompt_tokens_details.get("cached_tokens", 0)
             if cached_tokens:
                 anthropic_usage["cache_read_input_tokens"] = cached_tokens
+            # 提取 audio_tokens（Chat API 特有）
+            audio_tokens = prompt_tokens_details.get("audio_tokens", 0)
+            if audio_tokens:
+                anthropic_usage["audio_tokens"] = audio_tokens
         
         # 从 completion_tokens_details 提取推理 token 信息
         completion_tokens_details = usage.get("completion_tokens_details")
@@ -705,6 +723,16 @@ class AnthropicConverter:
             reasoning_tokens = completion_tokens_details.get("reasoning_tokens", 0)
             if reasoning_tokens:
                 anthropic_usage["output_tokens"] = usage.get("completion_tokens", 0)
+            # 提取 audio_tokens 输出
+            audio_tokens_output = completion_tokens_details.get("audio_tokens", 0)
+            if audio_tokens_output:
+                anthropic_usage["audio_output_tokens"] = audio_tokens_output
+        
+        # 从 Chat usage 额外字段中恢复 Anthropic 特有的 usage 数据（用于往返转换场景）
+        if usage.get("cache_creation_input_tokens"):
+            anthropic_usage["cache_creation_input_tokens"] = usage["cache_creation_input_tokens"]
+        if usage.get("cache_read_input_tokens"):
+            anthropic_usage["cache_read_input_tokens"] = usage["cache_read_input_tokens"]
         
         # Chat service_tier -> Anthropic usage.service_tier
         # Chat: "auto"|"default"|"flex"|"scale"|"priority"
@@ -722,7 +750,7 @@ class AnthropicConverter:
                 chat_service_tier, chat_service_tier
             )
         
-        return {
+        result = {
             "id": response.get("id", f"msg_{uuid.uuid4().hex[:24]}"),
             "type": "message",
             "role": "assistant",
@@ -733,6 +761,12 @@ class AnthropicConverter:
             "stop_details": stop_details,
             "usage": anthropic_usage
         }
+        
+        # 保留 container 字段（从 Chat usage 或直接来源中恢复）
+        if usage.get("container"):
+            result["container"] = usage["container"]
+        
+        return result
     
     @classmethod
     def _map_stop_reason(cls, openai_reason: str) -> str:
@@ -1032,15 +1066,19 @@ class AnthropicConverter:
                     })
             
             elif block_type == "text":
+                output_text = {
+                    "type": "output_text",
+                    "text": block.get("text", "")
+                }
+                # 保留 citations（Responses API output_text 支持 annotations）
+                if block.get("citations"):
+                    output_text["annotations"] = block["citations"]
                 output.append({
                     "type": "message",
                     "id": f"msg_{uuid.uuid4().hex[:24]}",
                     "role": "assistant",
                     "status": "completed",
-                    "content": [{
-                        "type": "output_text",
-                        "text": block.get("text", "")
-                    }]
+                    "content": [output_text]
                 })
             
             elif block_type == "tool_use":

@@ -290,10 +290,13 @@ class ProtocolConverterEngine:
                     if isinstance(content, str):
                         assistant_content.append({"type": "text", "text": content})
                     elif isinstance(content, list):
-                        assistant_content.extend([
-                            {"type": "text", "text": b.get("text", "")}
-                            for b in content if isinstance(b, dict) and b.get("type") == "text"
-                        ])
+                        for b in content:
+                            if isinstance(b, dict) and b.get("type") == "text":
+                                text_block = {"type": "text", "text": b.get("text", "")}
+                                # 保留 annotations -> citations 映射
+                                if b.get("annotations"):
+                                    text_block["citations"] = b["annotations"]
+                                assistant_content.append(text_block)
                 
                 # 处理 reasoning_content -> thinking 块
                 # Anthropic SDK: ThinkingBlock 必须包含 thinking + signature 字段
@@ -415,7 +418,11 @@ class ProtocolConverterEngine:
         if request.get("top_p") is not None:
             anthropic_request["top_p"] = request["top_p"]
         if request.get("stop"):
-            anthropic_request["stop_sequences"] = request["stop"] if isinstance(request["stop"], list) else [request["stop"]]
+            stop_val = request["stop"]
+            if isinstance(stop_val, list):
+                anthropic_request["stop_sequences"] = stop_val
+            else:
+                anthropic_request["stop_sequences"] = [stop_val]
         
         # user 字段 -> Anthropic metadata.user_id
         user_id = request.get("user")
@@ -527,6 +534,23 @@ class ProtocolConverterEngine:
             extra["logit_bias"] = request["logit_bias"]
         if request.get("web_search_options") is not None:
             extra["web_search_options"] = request["web_search_options"]
+        # Chat API 新增参数（Anthropic 不直接支持）
+        if request.get("verbosity") is not None:
+            extra["verbosity"] = request["verbosity"]
+        if request.get("modalities") is not None:
+            extra["modalities"] = request["modalities"]
+        if request.get("audio") is not None:
+            extra["audio"] = request["audio"]
+        if request.get("prediction") is not None:
+            extra["prediction"] = request["prediction"]
+        if request.get("safety_identifier") is not None:
+            extra["safety_identifier"] = request["safety_identifier"]
+        if request.get("prompt_cache_key") is not None:
+            extra["prompt_cache_key"] = request["prompt_cache_key"]
+        if request.get("prompt_cache_retention") is not None:
+            extra["prompt_cache_retention"] = request["prompt_cache_retention"]
+        if request.get("store") is not None:
+            extra["store"] = request["store"]
         if extra:
             anthropic_request["extra_body"] = extra
         
@@ -585,12 +609,16 @@ class ProtocolConverterEngine:
         """将 Anthropic 响应转换为 OpenAI Chat 响应"""
         content = response.get("content", [])
         message_content = None
+        message_annotations = None
         tool_calls = []
         reasoning_content = None
         
         for block in content:
             if block.get("type") == "text":
                 message_content = block.get("text", "")
+                # 保留 citations -> Chat annotations
+                if block.get("citations"):
+                    message_annotations = block["citations"]
             elif block.get("type") == "thinking":
                 # thinking 块 -> reasoning_content (OpenAI o系列格式)
                 thinking_text = block.get("thinking", "")
@@ -669,6 +697,12 @@ class ProtocolConverterEngine:
         if usage.get("cache_creation"):
             chat_usage["cache_creation"] = usage["cache_creation"]
         
+        # 保留 Anthropic 特有的 usage 字段（用于往返转换场景）
+        if usage.get("cache_creation_input_tokens"):
+            chat_usage["cache_creation_input_tokens"] = usage["cache_creation_input_tokens"]
+        if usage.get("cache_read_input_tokens"):
+            chat_usage["cache_read_input_tokens"] = usage["cache_read_input_tokens"]
+        
         # 构建 message
         message = {
             "role": "assistant",
@@ -678,6 +712,9 @@ class ProtocolConverterEngine:
             message["reasoning_content"] = reasoning_content
         if tool_calls:
             message["tool_calls"] = tool_calls
+        # 保留 annotations（从 Anthropic citations 转换）
+        if message_annotations is not None:
+            message["annotations"] = message_annotations
         
         return {
             "id": response.get("id", f"chatcmpl-{uuid.uuid4().hex[:24]}"),
