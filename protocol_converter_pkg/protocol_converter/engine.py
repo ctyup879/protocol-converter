@@ -295,6 +295,14 @@ class ProtocolConverterEngine:
                             for b in content if isinstance(b, dict) and b.get("type") == "text"
                         ])
                 
+                # 处理 reasoning_content -> thinking 块
+                reasoning_content = msg.get("reasoning_content")
+                if reasoning_content:
+                    assistant_content.insert(0, {
+                        "type": "thinking",
+                        "thinking": reasoning_content,
+                    })
+                
                 # 转换 tool_calls
                 tool_calls = msg.get("tool_calls", [])
                 for tc in tool_calls:
@@ -351,6 +359,32 @@ class ProtocolConverterEngine:
                                 anthropic_content.append({
                                     "type": "image",
                                     "source": {"type": "url", "url": url_str}
+                                })
+                    elif block_type == "file":
+                        # Chat file 内容块 -> Anthropic document 块
+                        file_data = block.get("file", {})
+                        file_url = file_data.get("file_data", "")
+                        mime_type = file_data.get("mime_type", "application/octet-stream")
+                        if file_url:
+                            if file_url.startswith("data:"):
+                                # data:application/pdf;base64,...
+                                parts = file_url.split(";", 1)
+                                media_type = parts[0].replace("data:", "") if len(parts) > 1 else mime_type
+                                data = parts[1].replace("base64,", "") if len(parts) > 1 else ""
+                                anthropic_content.append({
+                                    "type": "document",
+                                    "source": {"type": "base64", "media_type": media_type, "data": data}
+                                })
+                            elif file_url.startswith("http"):
+                                anthropic_content.append({
+                                    "type": "document",
+                                    "source": {"type": "url", "url": file_url}
+                                })
+                            else:
+                                # 可能是纯 base64 数据
+                                anthropic_content.append({
+                                    "type": "document",
+                                    "source": {"type": "base64", "media_type": mime_type, "data": file_url}
                                 })
                     else:
                         text = block.get("text", "")
@@ -502,8 +536,23 @@ class ProtocolConverterEngine:
                 message_content = block.get("text", "")
             elif block.get("type") == "thinking":
                 # thinking 块 -> reasoning_content (OpenAI o系列格式)
-                reasoning_content = block.get("thinking", "")
+                thinking_text = block.get("thinking", "")
+                if thinking_text:
+                    reasoning_content = thinking_text
+            elif block.get("type") == "redacted_thinking":
+                # 脱敏思考块 - 跳过（Chat API 无对应字段）
+                pass
             elif block.get("type") == "tool_use":
+                tool_calls.append({
+                    "id": block.get("id", f"call_{uuid.uuid4().hex[:24]}"),
+                    "type": "function",
+                    "function": {
+                        "name": block.get("name", ""),
+                        "arguments": json.dumps(block.get("input", {}), ensure_ascii=False)
+                    }
+                })
+            elif block.get("type") == "server_tool_use":
+                # 服务器工具调用 - 转为普通工具调用
                 tool_calls.append({
                     "id": block.get("id", f"call_{uuid.uuid4().hex[:24]}"),
                     "type": "function",
@@ -527,6 +576,18 @@ class ProtocolConverterEngine:
         
         usage = response.get("usage", {})
         
+        # 构建 Chat usage (含 prompt_tokens_details 和 completion_tokens_details)
+        chat_usage = {
+            "prompt_tokens": usage.get("input_tokens", 0),
+            "completion_tokens": usage.get("output_tokens", 0),
+            "total_tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
+        }
+        
+        # 缓存 token 信息
+        cached_tokens = usage.get("cache_read_input_tokens", 0)
+        if cached_tokens:
+            chat_usage["prompt_tokens_details"] = {"cached_tokens": cached_tokens}
+        
         # 构建 message
         message = {
             "role": "assistant",
@@ -547,11 +608,7 @@ class ProtocolConverterEngine:
                 "message": message,
                 "finish_reason": finish_reason
             }],
-            "usage": {
-                "prompt_tokens": usage.get("input_tokens", 0),
-                "completion_tokens": usage.get("output_tokens", 0),
-                "total_tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
-            }
+            "usage": chat_usage
         }
     
     def _responses_to_chat_response(self, response: Dict[str, Any]) -> Dict[str, Any]:

@@ -28,7 +28,9 @@ class ProtocolDetector:
     
     # OpenAI Responses API 特征
     OPENAI_RESPONSES_KEYS = {"model", "input", "max_output_tokens"}
-    OPENAI_RESPONSES_INPUT_TYPES = {"message", "text", "image", "function_call", "function_call_output"}
+    OPENAI_RESPONSES_INPUT_TYPES = {"message", "text", "image", "function_call", "function_call_output",
+                                     "input_text", "input_image", "input_file",
+                                     "computer_call_output", "reasoning"}
     # Responses API 特有参数（Chat API 不存在这些参数）
     OPENAI_RESPONSES_SPECIFIC_KEYS = {
         "previous_response_id", "reasoning", "text", "truncation",
@@ -49,6 +51,15 @@ class ProtocolDetector:
     ANTHROPIC_SPECIFIC_KEYS = {
         "stop_sequences", "thinking", "cache_control", "top_k",
         "container", "output_config", "inference_geo",
+    }
+    # Anthropic 特有的服务器工具类型
+    ANTHROPIC_SERVER_TOOL_TYPES = {
+        "bash_20250124", "text_editor_20250124", "text_editor_20250429", "text_editor_20250728",
+        "code_execution_20250522", "code_execution_20250825", "code_execution_20260120",
+        "web_search_20250305", "web_search_20260209",
+        "web_fetch_20250910", "web_fetch_20260209", "web_fetch_20260309",
+        "memory_20250818",
+        "tool_search_bm25_20251119", "tool_search_regex_20251119",
     }
     
     @classmethod
@@ -125,6 +136,15 @@ class ProtocolDetector:
             return True
         if isinstance(tool_choice, dict) and tool_choice.get("type") == "tool":
             return True
+        
+        # 检查 tools 列表中是否包含 Anthropic 服务器工具类型
+        tools = request.get("tools", [])
+        if isinstance(tools, list):
+            for tool in tools[:5]:
+                if isinstance(tool, dict):
+                    tool_type = tool.get("type", "")
+                    if tool_type in cls.ANTHROPIC_SERVER_TOOL_TYPES:
+                        return True
         
         # 检查消息内容是否包含 Anthropic 特有的内容类型
         for msg in messages[:5]:

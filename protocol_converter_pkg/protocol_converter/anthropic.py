@@ -10,6 +10,8 @@ Anthropic Messages API 请求参数:
 - messages (必填): 消息列表
 - system: 系统提示词 (str | TextBlockParam[])
 - tools: 工具定义 (ToolUnionParam[])
+  - 客户端工具: {"name", "description", "input_schema"}
+  - 服务器工具: type 为 bash_20250124, text_editor_*, code_execution_*, web_search_*, web_fetch_*, memory_*, tool_search_*
 - tool_choice: 工具选择策略 ("auto" | "any" | "none" | {"type": "tool", "name": "..."})
 - temperature: 温度 (0.0-1.0, 默认 1.0)
 - top_p: nucleus 采样
@@ -18,6 +20,7 @@ Anthropic Messages API 请求参数:
 - stream: 是否流式
 - thinking: 扩展思考配置
   - {"type": "enabled", "budget_tokens": N, "display": "summarized"|"omitted"}
+    - display: "summarized" = 正常返回thinking, "omitted" = 脱敏但返回signature
   - {"type": "disabled"}
   - {"type": "adaptive", "budget_tokens": N, "display": "summarized"|"omitted"}
 - metadata: 元数据 {"user_id": "..."}
@@ -33,8 +36,8 @@ Anthropic 消息内容块类型:
 - document: 文档 (PDF等, source: base64 | url | text)
 - tool_use: 工具调用
 - tool_result: 工具结果
-- thinking: 扩展思考
-- redacted_thinking: 脱敏思考
+- thinking: 扩展思考 (含 thinking + signature)
+- redacted_thinking: 脱敏思考 (仅含 signature)
 - server_tool_use: 服务器工具调用
 - web_search_tool_result: 网页搜索结果
 - web_fetch_tool_result: 网页获取结果
@@ -162,7 +165,21 @@ class AnthropicConverter:
             messages.extend(converted_list)
         
         # 3. 转换 tools
-        tools = cls._convert_tools(request.get("tools", []))
+        raw_tools = request.get("tools", [])
+        tools = cls._convert_tools(raw_tools)
+        
+        # 3.5 保留 Anthropic 服务器工具在 extra_body 中
+        server_tools = []
+        ANTHROPIC_SERVER_TOOL_PREFIXES = (
+            "bash_", "text_editor_", "code_execution_",
+            "web_search_", "web_fetch_", "memory_",
+            "tool_search_",
+        )
+        for tool in raw_tools:
+            if isinstance(tool, dict):
+                tool_type = tool.get("type", "")
+                if any(tool_type.startswith(prefix) for prefix in ANTHROPIC_SERVER_TOOL_PREFIXES):
+                    server_tools.append(tool)
         
         # 4. 转换 tool_choice
         tool_choice = cls._convert_tool_choice(request.get("tool_choice"))
@@ -227,6 +244,7 @@ class AnthropicConverter:
         if request.get("top_k") is not None:
             extra["top_k"] = request["top_k"]
         # thinking 参数保留原始值（含 display, adaptive 等子字段）以防后端需要
+        # display: "summarized" | "omitted" - 控制 thinking 内容的显示方式
         if thinking and isinstance(thinking, dict):
             extra["thinking"] = thinking
         if request.get("cache_control") is not None:
@@ -237,6 +255,12 @@ class AnthropicConverter:
             extra["output_config"] = request["output_config"]
         if request.get("inference_geo") is not None:
             extra["inference_geo"] = request["inference_geo"]
+        if request.get("metadata") is not None:
+            # 保留完整 metadata (不仅仅是 user_id)
+            extra["metadata"] = request["metadata"]
+        # 保留 Anthropic 服务器工具
+        if server_tools:
+            extra["anthropic_server_tools"] = server_tools
         if extra:
             chat_request["extra_body"] = extra
         
@@ -512,10 +536,30 @@ class AnthropicConverter:
         转换 Anthropic 工具定义到 OpenAI 格式
         
         Anthropic: {"name", "description", "input_schema"}
+        Anthropic 服务器工具: {"type": "bash_20250124", ...}, {"type": "web_search_20250305", ...} 等
         OpenAI: {"type": "function", "function": {"name", "description", "parameters"}}
         """
+        # Anthropic 服务器工具类型 (type 格式: name_YYYYMMDD)
+        ANTHROPIC_SERVER_TOOL_PREFIXES = (
+            "bash_", "text_editor_", "code_execution_",
+            "web_search_", "web_fetch_", "memory_",
+            "tool_search_",
+        )
+        
         converted = []
         for tool in tools:
+            if not isinstance(tool, dict):
+                continue
+            
+            tool_type = tool.get("type", "")
+            
+            # 检查是否为 Anthropic 服务器工具 (type 为 name_YYYYMMDD 格式)
+            is_server_tool = any(tool_type.startswith(prefix) for prefix in ANTHROPIC_SERVER_TOOL_PREFIXES)
+            
+            if is_server_tool:
+                # 服务器工具 - 放入 extra_body 保留原始定义
+                continue
+            
             if "name" in tool:
                 func_def = {
                     "name": tool["name"],
@@ -566,8 +610,8 @@ class AnthropicConverter:
         """
         OpenAI Chat 响应转换为 Anthropic 格式
         
-        OpenAI: {"id", "model", "choices": [{"message": {"content", "tool_calls"}, "finish_reason"}], "usage"}
-        Anthropic: {"id", "type", "role", "content": [{"type": "text"}|{"type": "tool_use"}], 
+        OpenAI: {"id", "model", "choices": [{"message": {"content", "tool_calls", "reasoning_content"}, "finish_reason"}], "usage"}
+        Anthropic: {"id", "type", "role", "content": [{"type": "text"}|{"type": "thinking"}|{"type": "tool_use"}], 
                     "model", "stop_reason", "stop_sequence", "stop_details", "usage"}
         """
         choices = response.get("choices", [])
@@ -579,6 +623,14 @@ class AnthropicConverter:
             message = choice.get("message", {})
             content = message.get("content")
             tool_calls = message.get("tool_calls", [])
+            reasoning_content = message.get("reasoning_content")
+            
+            # 处理推理内容 -> thinking 块 (必须在文本块之前)
+            if reasoning_content:
+                content_blocks.append({
+                    "type": "thinking",
+                    "thinking": reasoning_content,
+                })
             
             # 处理文本内容
             if content:
@@ -635,6 +687,17 @@ class AnthropicConverter:
             cached_tokens = prompt_tokens_details.get("cached_tokens", 0)
             if cached_tokens:
                 anthropic_usage["cache_read_input_tokens"] = cached_tokens
+        
+        # 从 completion_tokens_details 提取推理 token 信息
+        completion_tokens_details = usage.get("completion_tokens_details")
+        if isinstance(completion_tokens_details, dict):
+            reasoning_tokens = completion_tokens_details.get("reasoning_tokens", 0)
+            if reasoning_tokens:
+                anthropic_usage["server_tool_use"] = {}
+        
+        # 提取 service_tier
+        if usage.get("service_tier"):
+            anthropic_usage["service_tier"] = usage["service_tier"]
         
         return {
             "id": response.get("id", f"msg_{uuid.uuid4().hex[:24]}"),
@@ -889,6 +952,12 @@ class AnthropicConverter:
     def to_openai_responses(cls, response: Dict[str, Any]) -> Dict[str, Any]:
         """
         Anthropic 响应转换为 OpenAI Responses 格式
+        
+        内容块映射:
+        - thinking -> reasoning 输出项
+        - text -> message 输出项 (output_text)
+        - tool_use -> function_call 输出项
+        - redacted_thinking -> reasoning 输出项 (仅含 encrypted_content)
         """
         output = []
         content = response.get("content", [])
@@ -896,7 +965,39 @@ class AnthropicConverter:
         for block in content:
             block_type = block.get("type")
             
-            if block_type == "text":
+            if block_type == "thinking":
+                # thinking 块 -> reasoning 输出项
+                reasoning_content = []
+                thinking_text = block.get("thinking", "")
+                if thinking_text:
+                    reasoning_content.append({
+                        "type": "reasoning_text",
+                        "text": thinking_text
+                    })
+                reasoning_item = {
+                    "type": "reasoning",
+                    "id": f"rs_{uuid.uuid4().hex[:24]}",
+                    "content": reasoning_content,
+                    "status": "completed",
+                }
+                # 如果有 signature，添加 encrypted_content
+                signature = block.get("signature")
+                if signature:
+                    reasoning_item["encrypted_content"] = signature
+                output.append(reasoning_item)
+            
+            elif block_type == "redacted_thinking":
+                # 脱敏思考块 -> reasoning 输出项 (仅含 encrypted_content)
+                signature = block.get("signature")
+                if signature:
+                    output.append({
+                        "type": "reasoning",
+                        "id": f"rs_{uuid.uuid4().hex[:24]}",
+                        "encrypted_content": signature,
+                        "status": "completed",
+                    })
+            
+            elif block_type == "text":
                 output.append({
                     "type": "message",
                     "id": f"msg_{uuid.uuid4().hex[:24]}",
@@ -917,21 +1018,62 @@ class AnthropicConverter:
                     "arguments": json.dumps(block.get("input", {}), ensure_ascii=False),
                     "status": "completed"
                 })
+            
+            elif block_type == "server_tool_use":
+                # 服务器工具调用 - 转为 function_call
+                output.append({
+                    "type": "function_call",
+                    "id": block.get("id", f"call_{uuid.uuid4().hex[:24]}"),
+                    "call_id": block.get("id", ""),
+                    "name": block.get("name", ""),
+                    "arguments": json.dumps(block.get("input", {}), ensure_ascii=False),
+                    "status": "completed"
+                })
+        
+        # 映射停止原因
+        stop_reason = response.get("stop_reason", "end_turn")
+        status = "completed"
+        incomplete_details = None
+        if stop_reason == "max_tokens":
+            status = "incomplete"
+            incomplete_details = {"reason": "max_output_tokens"}
+        elif stop_reason == "refusal":
+            status = "incomplete"
+            incomplete_details = {"reason": "content_filter"}
         
         usage = response.get("usage", {})
-        return {
+        
+        # 构建 Responses usage (含 input_tokens_details 和 output_tokens_details)
+        response_usage = {
+            "input_tokens": usage.get("input_tokens", 0),
+            "output_tokens": usage.get("output_tokens", 0),
+            "total_tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
+        }
+        
+        # input_tokens_details
+        cached_tokens = usage.get("cache_read_input_tokens", 0)
+        if cached_tokens:
+            response_usage["input_tokens_details"] = {"cached_tokens": cached_tokens}
+        
+        # output_tokens_details
+        cache_creation = usage.get("cache_creation_input_tokens", 0)
+        if cache_creation:
+            response_usage["output_tokens_details"] = {"reasoning_tokens": 0}
+        
+        result = {
             "id": response.get("id", f"resp_{uuid.uuid4().hex[:24]}"),
             "object": "response",
-            "status": "completed",
+            "status": status,
             "created_at": time.time(),
             "model": response.get("model", ""),
             "output": output,
-            "usage": {
-                "input_tokens": usage.get("input_tokens", 0),
-                "output_tokens": usage.get("output_tokens", 0),
-                "total_tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
-            }
+            "usage": response_usage,
         }
+        
+        if incomplete_details:
+            result["incomplete_details"] = incomplete_details
+        
+        return result
 
 
 class AnthropicStreamingParser:

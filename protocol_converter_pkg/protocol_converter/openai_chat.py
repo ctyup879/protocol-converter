@@ -27,8 +27,11 @@ OpenAI Chat Completions API 请求参数:
 - user: 用户标识符 (被 safety_identifier/prompt_cache_key 替代)
 - store: 是否存储
 - reasoning_effort: 推理努力 (none, minimal, low, medium, high, xhigh)
+  - gpt-5.1 默认 none，支持 none/low/medium/high
+  - gpt-5-pro 默认且仅支持 high
+  - xhigh 支持 gpt-5.1-codex-max 之后的模型
 - parallel_tool_calls: 是否允许并行工具调用
-- web_search_options: 网页搜索选项
+- web_search_options: 网页搜索选项 (search_context_size + user_location)
 - service_tier: 服务层级 (auto, default, flex, scale, priority)
 - metadata: 元数据 (最多16个键值对)
 - modalities: 输出类型 (text, audio)

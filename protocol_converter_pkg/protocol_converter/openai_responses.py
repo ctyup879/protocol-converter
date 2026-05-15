@@ -7,27 +7,29 @@ OpenAI Responses API 协议转换器
 OpenAI Responses API 请求参数:
 - model (必填): 模型名称
 - input (必填): string | ResponseInputParam[] (文本/图片/文件输入)
-- instructions: 系统提示词
-- tools: 工具定义 (function | web_search | file_search | computer | mcp | code_interpreter | image_generation | local_shell | custom)
+- instructions: 系统提示词 (也可以是 ResponseInputItem[])
+- tools: 工具定义 (function | web_search | file_search | computer | mcp | code_interpreter | image_generation | local_shell | custom | apply_patch | namespace | tool_search)
 - tool_choice: 工具选择策略 (auto | none | required | function | mcp | custom | apply_patch | shell | allowed | types)
 - temperature: 温度 (0-2)
 - top_p: nucleus 采样
 - max_output_tokens: 最大输出 token 数
 - stream: 是否流式
 - stream_options: 流式选项 {"include_obfuscation": bool}
-- previous_response_id: 上一个响应 ID (用于多轮对话)
+- previous_response_id: 上一个响应 ID (用于多轮对话, 不能与 conversation 同时使用)
 - store: 是否存储响应
 - metadata: 元数据
-- reasoning: 推理配置 (o系列模型, 含 effort + summary)
+- reasoning: 推理配置 (gpt-5和o系列模型, 含 effort + summary)
+  - effort: "none" | "minimal" | "low" | "medium" | "high" | "xhigh"
+  - summary: "auto" | "concise" | "detailed" | None
 - text: 文本输出配置 (structured outputs, 含 format)
 - parallel_tool_calls: 是否允许并行工具调用
 - truncation: 截断策略 ("auto" | "disabled")
 - service_tier: 服务层级 ("auto" | "default" | "flex" | "scale" | "priority")
 - background: 是否后台运行
 - max_tool_calls: 最大工具调用次数
-- conversation: 对话参数 (conversation ID 或 ConversationParam)
+- conversation: 对话参数 (conversation ID 或 ConversationParam, 不能与 previous_response_id 同时使用)
 - context_management: 上下文管理配置
-- include: 额外输出数据
+- include: 额外输出数据 (web_search_call.action.sources, code_interpreter_call.outputs, etc.)
 - prompt: 提示模板
 - safety_identifier: 安全标识符
 - prompt_cache_key: 缓存键
@@ -39,14 +41,24 @@ OpenAI Responses 输入项类型:
 - message: 消息 {"type": "message", "role", "content": [...]}
 - function_call: 函数调用 {"type": "function_call", "call_id", "name", "arguments"}
 - function_call_output: 函数调用结果 {"type": "function_call_output", "call_id", "output"}
+- computer_call_output: 计算机调用输出
+- reasoning: 推理项
 
 OpenAI Responses 输出项类型:
 - message: 消息 {"type": "message", "role", "content": [...]}
-- function_call: 函数调用
+- function_call: 函数调用 {"type": "function_call", "call_id", "name", "arguments", "status"}
+- reasoning: 推理项 {"type": "reasoning", "id", "content": [...], "encrypted_content", "status"}
 - web_search_call: 网页搜索调用
 - file_search_call: 文件搜索调用
 - computer_call: 计算机调用
-- reasoning: 推理项
+- code_interpreter_call: 代码解释器调用
+- image_generation_call: 图片生成调用
+- local_shell_call: 本地终端调用
+- mcp_call: MCP 调用
+- custom_tool_call: 自定义工具调用
+- apply_patch_tool_call: 补丁工具调用
+- tool_search_call: 工具搜索调用
+- compaction_item: 压缩项
 
 OpenAI Responses 流式事件 (严格顺序):
   response.created -> response.in_progress -> [response.output_item.added -> [response.content_part.added -> response.output_text.delta* -> response.output_text.done -> response.content_part.done]? -> response.function_call_arguments.delta* -> response.function_call_arguments.done]? -> response.output_item.done]* -> response.completed | response.failed
@@ -62,6 +74,13 @@ OpenAI Responses 流式事件 (严格顺序):
 - response.output_item.done: 输出项完成
 - response.completed: 响应完成
 - response.failed: 响应失败
+
+OpenAI Responses Usage 字段:
+- input_tokens: 输入 token 数
+- output_tokens: 输出 token 数
+- total_tokens: 总 token 数
+- input_tokens_details: {cached_tokens: int}
+- output_tokens_details: {reasoning_tokens: int}
 """
 
 import json
@@ -171,6 +190,10 @@ class OpenAIResponsesConverter:
                 chat_request["user"] = user_id
             # 保留完整 metadata
             chat_request["metadata"] = metadata
+        
+        # 6.5 处理 user 参数 (被 safety_identifier/prompt_cache_key 替代)
+        if request.get("user"):
+            chat_request["user"] = request["user"]
         
         # 7. 处理 store 参数
         if request.get("store") is not None:
@@ -304,6 +327,18 @@ class OpenAIResponsesConverter:
             # 推理项 - Chat API 不直接支持，跳过
             return None
         
+        elif item_type == "local_shell_call_output":
+            # 本地终端调用输出
+            return {
+                "role": "tool",
+                "tool_call_id": item.get("call_id", ""),
+                "content": str(item.get("output", ""))
+            }
+        
+        elif item_type == "mcp_approval_response":
+            # MCP 审批响应 - 跳过
+            return None
+        
         # 未知类型，尝试作为消息处理
         if "role" in item and "content" in item:
             role = cls.ROLE_MAP.get(item.get("role", ""), item.get("role", "user"))
@@ -367,6 +402,10 @@ class OpenAIResponsesConverter:
                     })
                 elif filename:
                     text_parts.append(f"[File: {filename}]")
+            
+            elif item_type == "reasoning_text":
+                # 推理文本 - Chat API 不直接支持，跳过
+                pass
             
             elif item_type == "output_text":
                 text_parts.append(item.get("text", ""))
@@ -805,7 +844,7 @@ class OpenAIResponsesConverter:
         """
         OpenAI Chat 响应转换为 Responses 格式
         
-        Chat: {"id", "model", "choices": [{"message": {"content", "tool_calls"}, "finish_reason"}], "usage"}
+        Chat: {"id", "model", "choices": [{"message": {"content", "tool_calls", "reasoning_content"}, "finish_reason"}], "usage"}
         Responses: {"id", "object", "status", "created_at", "model", "output": [...], "usage", 
                     "incomplete_details", "error", "metadata", "parallel_tool_calls", "service_tier"}
         """
@@ -818,6 +857,19 @@ class OpenAIResponsesConverter:
             message = choice.get("message", {})
             content = message.get("content")
             finish_reason = choice.get("finish_reason", "")
+            reasoning_content = message.get("reasoning_content")
+            
+            # 处理推理内容 -> reasoning 输出项
+            if reasoning_content:
+                output.append({
+                    "type": "reasoning",
+                    "id": f"rs_{uuid.uuid4().hex[:24]}",
+                    "content": [{
+                        "type": "reasoning_text",
+                        "text": reasoning_content
+                    }],
+                    "status": "completed"
+                })
             
             # 处理工具调用（先输出 function_call，再输出 message）
             tool_calls = message.get("tool_calls", [])
@@ -862,8 +914,28 @@ class OpenAIResponsesConverter:
                 status = "incomplete"
                 incomplete_details = {"reason": "content_filter"}
         
-        # 转换 usage
+        # 转换 usage - 包含 input_tokens_details 和 output_tokens_details
         usage = response.get("usage", {})
+        
+        response_usage = {
+            "input_tokens": usage.get("prompt_tokens", 0),
+            "output_tokens": usage.get("completion_tokens", 0),
+            "total_tokens": usage.get("total_tokens", 0),
+        }
+        
+        # input_tokens_details: 从 prompt_tokens_details.cached_tokens 提取
+        prompt_tokens_details = usage.get("prompt_tokens_details")
+        if isinstance(prompt_tokens_details, dict):
+            cached_tokens = prompt_tokens_details.get("cached_tokens", 0)
+            if cached_tokens:
+                response_usage["input_tokens_details"] = {"cached_tokens": cached_tokens}
+        
+        # output_tokens_details: 从 completion_tokens_details.reasoning_tokens 提取
+        completion_tokens_details = usage.get("completion_tokens_details")
+        if isinstance(completion_tokens_details, dict):
+            reasoning_tokens = completion_tokens_details.get("reasoning_tokens", 0)
+            if reasoning_tokens:
+                response_usage["output_tokens_details"] = {"reasoning_tokens": reasoning_tokens}
         
         result = {
             "id": response.get("id", f"resp_{uuid.uuid4().hex[:24]}"),
@@ -872,11 +944,7 @@ class OpenAIResponsesConverter:
             "created_at": response.get("created", int(time.time())),
             "model": response.get("model", ""),
             "output": output,
-            "usage": {
-                "input_tokens": usage.get("prompt_tokens", 0),
-                "output_tokens": usage.get("completion_tokens", 0),
-                "total_tokens": usage.get("total_tokens", 0)
-            },
+            "usage": response_usage,
             "incomplete_details": incomplete_details,
             "error": None,
             "metadata": response.get("metadata"),
@@ -946,6 +1014,80 @@ class OpenAIResponsesConverter:
                         "arguments": item.get("arguments", "{}")
                     }
                 })
+            
+            # 以下输出项类型在 Chat API 中无直接等价，忽略或部分转换
+            
+            elif item_type == "web_search_call":
+                # 网页搜索调用 - Chat API 无等价项，跳过
+                pass
+            
+            elif item_type == "file_search_call":
+                # 文件搜索调用 - Chat API 无等价项，跳过
+                pass
+            
+            elif item_type == "computer_call":
+                # 计算机调用 - Chat API 无等价项，跳过
+                pass
+            
+            elif item_type == "code_interpreter_call":
+                # 代码解释器调用 - Chat API 无等价项，跳过
+                pass
+            
+            elif item_type == "image_generation_call":
+                # 图片生成调用 - Chat API 无等价项，跳过
+                pass
+            
+            elif item_type == "local_shell_call":
+                # 本地终端调用 - Chat API 无等价项，跳过
+                pass
+            
+            elif item_type == "mcp_call":
+                # MCP 调用 - 尝试转为工具调用
+                name = item.get("name", "")
+                if name:
+                    tool_calls.append({
+                        "id": item.get("id", f"call_{uuid.uuid4().hex[:24]}"),
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "arguments": item.get("arguments", "{}")
+                        }
+                    })
+            
+            elif item_type == "custom_tool_call":
+                # 自定义工具调用 - 转为工具调用
+                name = item.get("name", "")
+                if name:
+                    tool_calls.append({
+                        "id": item.get("id", item.get("call_id", f"call_{uuid.uuid4().hex[:24]}")),
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "arguments": item.get("arguments", "{}")
+                        }
+                    })
+            
+            elif item_type == "apply_patch_tool_call":
+                # 补丁工具调用 - 转为工具调用
+                tool_calls.append({
+                    "id": item.get("id", item.get("call_id", f"call_{uuid.uuid4().hex[:24]}")),
+                    "type": "function",
+                    "function": {
+                        "name": "apply_patch",
+                        "arguments": item.get("arguments", "{}")
+                    }
+                })
+            
+            elif item_type == "shell_tool_call":
+                # Shell 工具调用 - 转为工具调用
+                tool_calls.append({
+                    "id": item.get("id", item.get("call_id", f"call_{uuid.uuid4().hex[:24]}")),
+                    "type": "function",
+                    "function": {
+                        "name": "shell",
+                        "arguments": item.get("arguments", "{}")
+                    }
+                })
         
         # 映射状态
         status = response.get("status", "completed")
@@ -957,8 +1099,31 @@ class OpenAIResponsesConverter:
                 finish_reason = "length"
             elif reason == "content_filter":
                 finish_reason = "content_filter"
+        elif status == "failed":
+            finish_reason = "stop"
         
         usage = response.get("usage", {})
+        
+        # 构建 Chat usage (含 prompt_tokens_details 和 completion_tokens_details)
+        chat_usage = {
+            "prompt_tokens": usage.get("input_tokens", 0),
+            "completion_tokens": usage.get("output_tokens", 0),
+            "total_tokens": usage.get("total_tokens", 0)
+        }
+        
+        # input_tokens_details.cached_tokens -> prompt_tokens_details.cached_tokens
+        input_tokens_details = usage.get("input_tokens_details")
+        if isinstance(input_tokens_details, dict):
+            cached_tokens = input_tokens_details.get("cached_tokens", 0)
+            if cached_tokens:
+                chat_usage["prompt_tokens_details"] = {"cached_tokens": cached_tokens}
+        
+        # output_tokens_details.reasoning_tokens -> completion_tokens_details.reasoning_tokens
+        output_tokens_details = usage.get("output_tokens_details")
+        if isinstance(output_tokens_details, dict):
+            reasoning_tokens = output_tokens_details.get("reasoning_tokens", 0)
+            if reasoning_tokens:
+                chat_usage["completion_tokens_details"] = {"reasoning_tokens": reasoning_tokens}
         
         # 构建 message
         message = {
@@ -980,11 +1145,7 @@ class OpenAIResponsesConverter:
                 "message": message,
                 "finish_reason": finish_reason
             }],
-            "usage": {
-                "prompt_tokens": usage.get("input_tokens", 0),
-                "completion_tokens": usage.get("output_tokens", 0),
-                "total_tokens": usage.get("total_tokens", 0)
-            }
+            "usage": chat_usage
         }
     
     # ================================================================
@@ -1009,6 +1170,7 @@ class OpenAIResponsesConverter:
         "content_part_started": False,
         "started_function_ids": set(),
         "output_index": 0,
+        "reasoning_item_started": False,
     }
     
     @classmethod
@@ -1019,6 +1181,7 @@ class OpenAIResponsesConverter:
             "content_part_started": False,
             "started_function_ids": set(),
             "output_index": 0,
+            "reasoning_item_started": False,
         }
     
     @classmethod
@@ -1072,6 +1235,32 @@ class OpenAIResponsesConverter:
                     "model": chunk.get("model", ""),
                     "output": [],
                 }
+            })
+            return events
+        
+        # 1.5 处理推理内容 (reasoning_content) -> reasoning 输出项
+        reasoning_content = delta.get("reasoning_content")
+        if reasoning_content is not None:
+            output_idx = cls._stream_state["output_index"]
+            
+            # 如果还没开始 reasoning 项，先发 output_item.added
+            if not cls._stream_state["reasoning_item_started"]:
+                cls._stream_state["reasoning_item_started"] = True
+                events.append({
+                    "type": "response.output_item.added",
+                    "output_index": output_idx,
+                    "item": {
+                        "type": "reasoning",
+                        "id": f"rs_{uuid.uuid4().hex[:24]}",
+                        "status": "in_progress",
+                        "content": []
+                    }
+                })
+            # 推理增量 - 使用自定义事件类型 (Responses API 没有标准的 reasoning delta 事件)
+            events.append({
+                "type": "response.reasoning.delta",
+                "output_index": output_idx,
+                "delta": reasoning_content
             })
             return events
         
@@ -1191,6 +1380,21 @@ class OpenAIResponsesConverter:
         # 4. 消息结束
         if finish_reason:
             output_idx = cls._stream_state["output_index"]
+            
+            # 关闭 reasoning 项
+            if cls._stream_state["reasoning_item_started"]:
+                events.append({
+                    "type": "response.output_item.done",
+                    "output_index": output_idx,
+                    "item": {
+                        "type": "reasoning",
+                        "id": f"rs_{uuid.uuid4().hex[:24]}",
+                        "status": "completed",
+                        "content": []
+                    }
+                })
+                cls._stream_state["reasoning_item_started"] = False
+                cls._stream_state["output_index"] += 1
             
             # 关闭消息项
             if cls._stream_state["message_item_started"]:
