@@ -414,10 +414,13 @@ class AnthropicConverter:
                     search_text = block.get("content", "")
                     if isinstance(search_text, str):
                         text_parts.append(f"[Search Result: {search_text}]")
+                        content_parts.append({"type": "text", "text": f"[Search Result: {search_text}]"})
                     elif isinstance(search_content := search_text, list):
                         for item in search_content:
                             if isinstance(item, dict) and item.get("type") == "text":
-                                text_parts.append(f"[Search Result: {item.get('text', '')}]")
+                                sr_text = f"[Search Result: {item.get('text', '')}]"
+                                text_parts.append(sr_text)
+                                content_parts.append({"type": "text", "text": sr_text})
                 
                 elif block_type == "server_tool_use":
                     # 服务器工具调用 - 转为普通工具调用
@@ -657,8 +660,8 @@ class AnthropicConverter:
                     "signature": "",  # Chat API 不提供 signature，设为空字符串
                 })
             
-            # 处理文本内容
-            if content:
+            # 处理文本内容（空字符串 "" 也是有效内容，有别于 None）
+            if content is not None:
                 text_block = {
                     "type": "text",
                     "text": content
@@ -986,6 +989,16 @@ class AnthropicConverter:
         
         # 5. 消息结束
         if finish_reason:
+            # 处理 content_filter 错误 -> error 事件
+            if finish_reason == "content_filter":
+                events.append({
+                    "type": "error",
+                    "error": {
+                        "type": "overloaded_error",
+                        "message": "Content filtered by safety system"
+                    }
+                })
+            
             # 关闭所有未关闭的 content blocks
             if cls._stream_state["thinking_block_started"]:
                 cls._stream_state["thinking_block_started"] = False
@@ -1087,6 +1100,7 @@ class AnthropicConverter:
                     output.append({
                         "type": "reasoning",
                         "id": f"rs_{uuid.uuid4().hex[:24]}",
+                        "content": [],
                         "encrypted_content": signature,
                         "status": "completed",
                     })

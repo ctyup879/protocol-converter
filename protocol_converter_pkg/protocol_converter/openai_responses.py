@@ -291,16 +291,17 @@ class OpenAIResponsesConverter:
             extra["include"] = request["include"]
         if request.get("prompt"):
             extra["prompt"] = request["prompt"]
+        # 以下参数在 Chat API 中为原生顶层参数，不应放入 extra_body
         if request.get("safety_identifier"):
-            extra["safety_identifier"] = request["safety_identifier"]
+            chat_request["safety_identifier"] = request["safety_identifier"]
         if request.get("prompt_cache_key"):
-            extra["prompt_cache_key"] = request["prompt_cache_key"]
+            chat_request["prompt_cache_key"] = request["prompt_cache_key"]
         if request.get("prompt_cache_retention"):
-            extra["prompt_cache_retention"] = request["prompt_cache_retention"]
+            chat_request["prompt_cache_retention"] = request["prompt_cache_retention"]
         if request.get("stream_options"):
-            extra["stream_options"] = request["stream_options"]
+            chat_request["stream_options"] = request["stream_options"]
         if request.get("top_logprobs") is not None:
-            extra["top_logprobs"] = request["top_logprobs"]
+            chat_request["top_logprobs"] = request["top_logprobs"]
         if extra:
             chat_request["extra_body"] = extra
         
@@ -628,7 +629,7 @@ class OpenAIResponsesConverter:
         # 提取简单文本输入（用于 OpenRouter 等兼容 API）
         simple_texts = []
         has_complex = False
-        instructions = None
+        instructions_parts = []  # 收集所有 system/developer 消息内容
         
         for msg in messages:
             role = msg.get("role", "user")
@@ -636,15 +637,17 @@ class OpenAIResponsesConverter:
             
             if role == "system" or role == "developer":
                 # developer 角色映射为 instructions（Responses API 语义）
-                if isinstance(content, str):
-                    instructions = content
+                # 多条 system/developer 消息应合并为 instructions
+                if isinstance(content, str) and content:
+                    instructions_parts.append(content)
                 elif isinstance(content, list):
                     # 多模态 system/developer 内容，提取文本
                     text_parts = []
                     for block in content:
                         if isinstance(block, dict) and block.get("type") == "text":
                             text_parts.append(block.get("text", ""))
-                    instructions = "\n".join(text_parts) if text_parts else ""
+                    if text_parts:
+                        instructions_parts.append("\n".join(text_parts))
             elif role == "user" and isinstance(content, str):
                 simple_texts.append(content)
             elif role == "assistant" and msg.get("tool_calls"):
@@ -653,6 +656,9 @@ class OpenAIResponsesConverter:
                 has_complex = True
             elif role not in ("user",) or not isinstance(content, str):
                 has_complex = True
+        
+        # 合并所有 system/developer 消息为 instructions
+        instructions = "\n\n".join(instructions_parts) if instructions_parts else None
         
         # 简单文本 -> 字符串 input；复杂 -> 数组 input
         if not has_complex and simple_texts:
@@ -1195,6 +1201,7 @@ class OpenAIResponsesConverter:
         # 映射状态
         status = response.get("status", "completed")
         finish_reason = "stop"
+        error_info = None
         if status == "incomplete":
             details = response.get("incomplete_details", {})
             reason = details.get("reason", "") if details else ""
@@ -1204,6 +1211,8 @@ class OpenAIResponsesConverter:
                 finish_reason = "content_filter"
         elif status == "failed":
             finish_reason = "stop"
+            # 保留错误信息
+            error_info = response.get("error")
         
         usage = response.get("usage", {})
         
@@ -1262,6 +1271,9 @@ class OpenAIResponsesConverter:
         # 保留 metadata
         if response.get("metadata"):
             result["metadata"] = response["metadata"]
+        # 保留错误信息（Responses failed 状态）
+        if error_info is not None:
+            result["error"] = error_info
         
         return result
     
@@ -1600,8 +1612,10 @@ class OpenAIResponsesConverter:
                 response_status = "incomplete"
                 incomplete_details = {"reason": "max_output_tokens"}
             elif finish_reason == "content_filter":
-                response_status = "incomplete"
-                incomplete_details = {"reason": "content_filter"}
+                # content_filter 可以映射为 incomplete 或 failed
+                # 对于安全性过滤，使用 failed 状态更准确
+                response_status = "failed"
+                error_detail = {"code": "content_filter", "message": "Content filtered by safety system"}
             
             completed_response = {
                 "id": chunk.get("id", ""),
@@ -1618,8 +1632,16 @@ class OpenAIResponsesConverter:
             if incomplete_details:
                 completed_response["incomplete_details"] = incomplete_details
             
+            # 根据状态选择完成或失败事件类型
+            if response_status == "failed":
+                if 'error_detail' in dir():
+                    completed_response["error"] = error_detail
+                event_type = "response.failed"
+            else:
+                event_type = "response.completed"
+            
             result = {
-                "type": "response.completed",
+                "type": event_type,
                 "response": completed_response
             }
             

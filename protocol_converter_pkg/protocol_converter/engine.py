@@ -405,7 +405,7 @@ class ProtocolConverterEngine:
         # 构建 Anthropic 请求
         anthropic_request = {
             "model": request.get("model", "claude-sonnet-4-20250514"),
-            "max_tokens": request.get("max_completion_tokens") or request.get("max_tokens", 4096),
+            "max_tokens": request.get("max_completion_tokens") if request.get("max_completion_tokens") is not None else request.get("max_tokens", 4096),
             "messages": anthropic_messages,
         }
         
@@ -716,7 +716,7 @@ class ProtocolConverterEngine:
         if message_annotations is not None:
             message["annotations"] = message_annotations
         
-        return {
+        result = {
             "id": response.get("id", f"chatcmpl-{uuid.uuid4().hex[:24]}"),
             "object": "chat.completion",
             "created": int(time.time()),
@@ -728,6 +728,12 @@ class ProtocolConverterEngine:
             }],
             "usage": chat_usage
         }
+        
+        # 保留 Anthropic container 字段（在顶层响应中）
+        if response.get("container"):
+            result["container"] = response["container"]
+        
+        return result
     
     def _responses_to_chat_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
         """将 OpenAI Responses 响应转换为 OpenAI Chat 响应"""
