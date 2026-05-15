@@ -1883,6 +1883,7 @@ class OpenAIResponsesConverter:
             usage = chunk.get("usage", {})
             response_status = "completed"
             incomplete_details = None
+            error_detail = None
             
             if finish_reason == "length":
                 response_status = "incomplete"
@@ -1910,7 +1911,7 @@ class OpenAIResponsesConverter:
             
             # 根据状态选择完成或失败事件类型
             if response_status == "failed":
-                if 'error_detail' in dir():
+                if error_detail:
                     completed_response["error"] = error_detail
                 event_type = "response.failed"
             else:

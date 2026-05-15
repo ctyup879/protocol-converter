@@ -464,11 +464,11 @@ class ProtocolConverterEngine:
         
         # 转换 tool_choice
         chat_tool_choice = request.get("tool_choice")
+        # Chat parallel_tool_calls: False → Anthropic tool_choice.disable_parallel_tool_use: True
+        parallel_tool_calls = request.get("parallel_tool_calls")
+        disable_parallel = parallel_tool_calls is False
+        
         if chat_tool_choice:
-            # Chat parallel_tool_calls: False → Anthropic tool_choice.disable_parallel_tool_use: True
-            parallel_tool_calls = request.get("parallel_tool_calls")
-            disable_parallel = parallel_tool_calls is False
-            
             if isinstance(chat_tool_choice, str):
                 tc_map = {"auto": "auto", "none": "none", "required": "any"}
                 tc_value = tc_map.get(chat_tool_choice, chat_tool_choice)
@@ -483,6 +483,11 @@ class ProtocolConverterEngine:
                     if disable_parallel:
                         tc_dict["disable_parallel_tool_use"] = True
                     anthropic_request["tool_choice"] = tc_dict
+        elif disable_parallel:
+            # parallel_tool_calls=False but no explicit tool_choice
+            # Anthropic requires disable_parallel_tool_use inside tool_choice,
+            # so set tool_choice to {"type":"auto","disable_parallel_tool_use":True}
+            anthropic_request["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": True}
         
         # reasoning_effort -> thinking
         reasoning_effort = request.get("reasoning_effort")
@@ -975,10 +980,23 @@ class ProtocolConverterEngine:
                 try:
                     chunk = json.loads(data_str)
                     
-                    # 如果是 Anthropic 后端的原始 SSE 数据，需要先转换为 Chat 格式
-                    # Anthropic 后端返回的事件格式与 Chat 不同，需要特殊处理
-                    if backend_format == "anthropic" and pending_event_type:
-                        chunk["_anthropic_event_type"] = pending_event_type
+                    # Anthropic 后端返回 Anthropic SSE 格式数据
+                    if backend_format == "anthropic":
+                        if source_protocol == Protocol.ANTHROPIC:
+                            # Anthropic→Anthropic: 直接转发原始 SSE
+                            event_type = pending_event_type or chunk.get("type", "message_delta")
+                            if event_type:
+                                yield f"event: {event_type}\ndata: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+                            else:
+                                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+                            pending_event_type = None
+                            continue
+                        else:
+                            # Anthropic→Chat/Responses: 需要将 Anthropic SSE 事件转换为 Chat 格式
+                            # 然后再转换为目标协议
+                            # 暂时将 Anthropic 事件类型附加到 chunk 中
+                            if pending_event_type:
+                                chunk["_anthropic_event_type"] = pending_event_type
                     pending_event_type = None
                     
                     # 使用多事件转换，以支持 Anthropic 的一对多映射

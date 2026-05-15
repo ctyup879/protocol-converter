@@ -4255,3 +4255,114 @@ class TestSDKCompatibilityGaps:
 
         assert result["messages"][0]["role"] == "system"
         assert request["messages"][0]["role"] == "developer"
+
+
+class TestBugFixes:
+    """v1.8.0 缺陷修复测试"""
+
+    def test_parallel_tool_calls_false_without_tool_choice(self):
+        """测试 parallel_tool_calls=False 但未设置 tool_choice 时，Anthropic tool_choice 仍包含 disable_parallel_tool_use"""
+        config = ConverterConfig(backend_type="anthropic")
+        engine = ProtocolConverterEngine(config)
+
+        chat_request = {
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tools": [{
+                "type": "function",
+                "function": {"name": "get_weather", "parameters": {"type": "object", "properties": {}}}
+            }],
+            "parallel_tool_calls": False,
+        }
+
+        result = engine.convert_request(chat_request)
+
+        # tool_choice 应被设置为 {"type": "auto", "disable_parallel_tool_use": True}
+        assert "tool_choice" in result
+        assert result["tool_choice"]["type"] == "auto"
+        assert result["tool_choice"]["disable_parallel_tool_use"] is True
+
+    def test_parallel_tool_calls_false_with_tool_choice_auto(self):
+        """测试 parallel_tool_calls=False 且 tool_choice=auto 时的 Anthropic 转换"""
+        config = ConverterConfig(backend_type="anthropic")
+        engine = ProtocolConverterEngine(config)
+
+        chat_request = {
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tools": [{
+                "type": "function",
+                "function": {"name": "get_weather", "parameters": {"type": "object", "properties": {}}}
+            }],
+            "tool_choice": "auto",
+            "parallel_tool_calls": False,
+        }
+
+        result = engine.convert_request(chat_request)
+
+        assert result["tool_choice"]["type"] == "auto"
+        assert result["tool_choice"]["disable_parallel_tool_use"] is True
+
+    def test_parallel_tool_calls_true_no_tool_choice(self):
+        """测试 parallel_tool_calls=True 且无 tool_choice 时不设置 Anthropic tool_choice"""
+        config = ConverterConfig(backend_type="anthropic")
+        engine = ProtocolConverterEngine(config)
+
+        chat_request = {
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tools": [{
+                "type": "function",
+                "function": {"name": "get_weather", "parameters": {"type": "object", "properties": {}}}
+            }],
+            "parallel_tool_calls": True,
+        }
+
+        result = engine.convert_request(chat_request)
+
+        # parallel_tool_calls=True 是默认值，不应设置 tool_choice
+        assert "tool_choice" not in result or result.get("tool_choice") is None
+
+    def test_responses_streaming_content_filter_failed_event(self):
+        """测试 Responses 流式 content_filter 生成 response.failed 事件时 error_detail 正确保留"""
+        # 先发 response.created
+        start_chunk = {
+            "id": "resp_123",
+            "model": "gpt-4o",
+            "choices": [{"delta": {"role": "assistant"}, "index": 0}]
+        }
+        OpenAIResponsesConverter.convert_stream_chunk(start_chunk)
+
+        # content_filter finish_reason
+        finish_chunk = {
+            "id": "resp_123",
+            "model": "gpt-4o",
+            "choices": [{
+                "delta": {},
+                "finish_reason": "content_filter",
+                "index": 0
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 0}
+        }
+
+        events = OpenAIResponsesConverter.convert_stream_chunk(finish_chunk)
+
+        # 找到 response.failed 事件
+        failed_events = [e for e in events if e["type"] == "response.failed"]
+        assert len(failed_events) == 1
+        # 验证 error_detail 被保留
+        assert failed_events[0]["response"]["error"] is not None
+        assert failed_events[0]["response"]["error"]["code"] == "content_filter"
+
+    def test_anthropic_convert_message_role_check(self):
+        """测试 Anthropic _convert_message 对不支持角色的处理"""
+        # "user" 和 "assistant" 是有效角色
+        user_msg = {"role": "user", "content": "Hello"}
+        result = AnthropicConverter._convert_message(user_msg)
+        assert len(result) == 1
+        assert result[0]["role"] == "user"
+
+        # "system" 不是 Anthropic 消息角色（应被过滤）
+        system_msg = {"role": "system", "content": "System prompt"}
+        result = AnthropicConverter._convert_message(system_msg)
+        assert len(result) == 0

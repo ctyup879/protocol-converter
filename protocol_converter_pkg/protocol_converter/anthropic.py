@@ -321,7 +321,7 @@ class AnthropicConverter:
         role = msg.get("role", "")
         content = msg.get("content", "")
         
-        if role not in cls.ROLE_MAP and role != "user":
+        if role not in cls.ROLE_MAP:
             return []
         
         openai_role = cls.ROLE_MAP.get(role, role)
