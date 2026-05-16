@@ -135,7 +135,7 @@ class ProtocolDetector:
         tool_choice = request.get("tool_choice")
         if tool_choice == "any":
             return True
-        if isinstance(tool_choice, dict) and tool_choice.get("type") == "tool":
+        if isinstance(tool_choice, dict) and tool_choice.get("type") in ("tool", "any"):
             return True
         
         # 检查 tools 列表中是否包含 Anthropic 服务器工具类型

@@ -4932,3 +4932,328 @@ class TestResponsesIncompleteEvent:
 
         event_types = [e.get("type") for e in events]
         assert "response.completed" in event_types
+
+
+# ============================================================
+# v1.12.0 新增测试
+# ============================================================
+
+class TestResponsesToAnthropicMaxOutputTokensZero:
+    """测试 Responses→Anthropic max_output_tokens=0 边界情况"""
+
+    def test_max_output_tokens_zero_not_defaulted(self):
+        """max_output_tokens=0 应保留为 0，不应默认为 4096"""
+        request = {
+            "model": "gpt-4o",
+            "input": "Hello",
+            "max_output_tokens": 0,
+        }
+        result = OpenAIResponsesConverter.to_anthropic_request(request)
+        assert result["max_tokens"] == 0
+
+    def test_max_output_tokens_absent_defaults_to_4096(self):
+        """缺少 max_output_tokens 时应默认为 4096"""
+        request = {
+            "model": "gpt-4o",
+            "input": "Hello",
+        }
+        result = OpenAIResponsesConverter.to_anthropic_request(request)
+        assert result["max_tokens"] == 4096
+
+    def test_max_output_tokens_positive_value(self):
+        """max_output_tokens 为正数时应正确传递"""
+        request = {
+            "model": "gpt-4o",
+            "input": "Hello",
+            "max_output_tokens": 2048,
+        }
+        result = OpenAIResponsesConverter.to_anthropic_request(request)
+        assert result["max_tokens"] == 2048
+
+
+class TestResponsesToAnthropicMetadataFix:
+    """测试 Responses→Anthropic metadata 覆盖 bug 修复"""
+
+    def test_metadata_user_id_preserved(self):
+        """metadata.user_id 应正确传递给 Anthropic metadata"""
+        request = {
+            "model": "gpt-4o",
+            "input": "Hello",
+            "metadata": {"user_id": "user-123"},
+        }
+        result = OpenAIResponsesConverter.to_anthropic_request(request)
+        assert result["metadata"] == {"user_id": "user-123"}
+
+    def test_metadata_non_user_fields_in_extra_body(self):
+        """metadata 中非 user_id 字段应放入 extra_body"""
+        request = {
+            "model": "gpt-4o",
+            "input": "Hello",
+            "metadata": {"user_id": "user-123", "custom_field": "value"},
+        }
+        result = OpenAIResponsesConverter.to_anthropic_request(request)
+        assert result["metadata"] == {"user_id": "user-123"}
+        assert "extra_body" in result
+        assert result["extra_body"]["metadata"] == {"custom_field": "value"}
+
+    def test_metadata_no_user_id(self):
+        """metadata 中没有 user_id 时不设置 anthropic metadata"""
+        request = {
+            "model": "gpt-4o",
+            "input": "Hello",
+            "metadata": {"custom_field": "value"},
+        }
+        result = OpenAIResponsesConverter.to_anthropic_request(request)
+        assert "metadata" not in result or result.get("metadata") is None
+        assert "extra_body" in result
+        assert result["extra_body"]["metadata"] == {"custom_field": "value"}
+
+
+class TestResponsesToAnthropicParallelToolCalls:
+    """测试 Responses→Anthropic parallel_tool_calls → disable_parallel_tool_use 映射"""
+
+    def test_parallel_tool_calls_false_with_auto_tool_choice(self):
+        """parallel_tool_calls=False + tool_choice=auto → Anthropic auto with disable_parallel"""
+        request = {
+            "model": "gpt-4o",
+            "input": "Hello",
+            "tools": [{"type": "function", "name": "test", "parameters": {}}],
+            "tool_choice": "auto",
+            "parallel_tool_calls": False,
+        }
+        result = OpenAIResponsesConverter.to_anthropic_request(request)
+        assert result["tool_choice"] == {"type": "auto", "disable_parallel_tool_use": True}
+
+    def test_parallel_tool_calls_false_without_tool_choice(self):
+        """parallel_tool_calls=False 无 tool_choice → Anthropic auto with disable_parallel"""
+        request = {
+            "model": "gpt-4o",
+            "input": "Hello",
+            "tools": [{"type": "function", "name": "test", "parameters": {}}],
+            "parallel_tool_calls": False,
+        }
+        result = OpenAIResponsesConverter.to_anthropic_request(request)
+        assert result["tool_choice"] == {"type": "auto", "disable_parallel_tool_use": True}
+
+    def test_parallel_tool_calls_false_with_required_tool_choice(self):
+        """parallel_tool_calls=False + tool_choice=required → Anthropic any with disable_parallel"""
+        request = {
+            "model": "gpt-4o",
+            "input": "Hello",
+            "tools": [{"type": "function", "name": "test", "parameters": {}}],
+            "tool_choice": "required",
+            "parallel_tool_calls": False,
+        }
+        result = OpenAIResponsesConverter.to_anthropic_request(request)
+        assert result["tool_choice"] == {"type": "any", "disable_parallel_tool_use": True}
+
+    def test_parallel_tool_calls_true_no_effect(self):
+        """parallel_tool_calls=True 不影响 tool_choice"""
+        request = {
+            "model": "gpt-4o",
+            "input": "Hello",
+            "tools": [{"type": "function", "name": "test", "parameters": {}}],
+            "tool_choice": "auto",
+            "parallel_tool_calls": True,
+        }
+        result = OpenAIResponsesConverter.to_anthropic_request(request)
+        assert result["tool_choice"] == "auto"
+
+
+class TestResponsesToAnthropicReasoningSummary:
+    """测试 Responses→Anthropic reasoning.summary → thinking.display 映射"""
+
+    def test_reasoning_summary_concise_to_display(self):
+        """reasoning.summary='concise' → thinking.display='summarized'"""
+        request = {
+            "model": "gpt-4o",
+            "input": "Hello",
+            "reasoning": {"effort": "medium", "summary": "concise"},
+        }
+        result = OpenAIResponsesConverter.to_anthropic_request(request)
+        assert result["thinking"]["type"] == "enabled"
+        assert result["thinking"]["display"] == "summarized"
+
+    def test_reasoning_summary_detailed_to_display(self):
+        """reasoning.summary='detailed' → thinking.display='summarized'"""
+        request = {
+            "model": "gpt-4o",
+            "input": "Hello",
+            "reasoning": {"effort": "high", "summary": "detailed"},
+        }
+        result = OpenAIResponsesConverter.to_anthropic_request(request)
+        assert result["thinking"]["display"] == "summarized"
+
+    def test_reasoning_summary_auto_no_display(self):
+        """reasoning.summary='auto' 不设置 display（使用 Anthropic 默认行为）"""
+        request = {
+            "model": "gpt-4o",
+            "input": "Hello",
+            "reasoning": {"effort": "medium", "summary": "auto"},
+        }
+        result = OpenAIResponsesConverter.to_anthropic_request(request)
+        assert "display" not in result["thinking"]
+
+    def test_reasoning_summary_none_no_display(self):
+        """reasoning.summary=None 不设置 display"""
+        request = {
+            "model": "gpt-4o",
+            "input": "Hello",
+            "reasoning": {"effort": "medium", "summary": None},
+        }
+        result = OpenAIResponsesConverter.to_anthropic_request(request)
+        assert "display" not in result["thinking"]
+
+    def test_reasoning_no_summary_no_display(self):
+        """缺少 reasoning.summary 不设置 display"""
+        request = {
+            "model": "gpt-4o",
+            "input": "Hello",
+            "reasoning": {"effort": "medium"},
+        }
+        result = OpenAIResponsesConverter.to_anthropic_request(request)
+        assert "display" not in result["thinking"]
+
+
+class TestProtocolDetectorToolChoiceAnyDict:
+    """测试 protocol_detector 识别 Anthropic tool_choice dict type='any'"""
+
+    def test_tool_choice_dict_any(self):
+        """tool_choice={'type': 'any'} 应检测为 Anthropic"""
+        request = {
+            "model": "some-model",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tool_choice": {"type": "any"},
+        }
+        assert ProtocolDetector.detect(request) == Protocol.ANTHROPIC
+
+    def test_tool_choice_dict_any_with_disable_parallel(self):
+        """tool_choice={'type': 'any', 'disable_parallel_tool_use': True} 应检测为 Anthropic"""
+        request = {
+            "model": "some-model",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tool_choice": {"type": "any", "disable_parallel_tool_use": True},
+        }
+        assert ProtocolDetector.detect(request) == Protocol.ANTHROPIC
+
+
+class TestAnthropicToChatStreamConversion:
+    """测试 Anthropic SSE 事件 → Chat 流式块转换"""
+
+    def test_message_start_event(self):
+        """message_start 事件应转换为 Chat chunk with role"""
+        AnthropicConverter.reset_anthropic_to_chat_state()
+        events = AnthropicConverter.convert_anthropic_event_to_chat("message_start", {
+            "message": {
+                "id": "msg_123",
+                "model": "claude-sonnet-4-20250514",
+                "usage": {"input_tokens": 10, "output_tokens": 0}
+            }
+        })
+        assert len(events) == 1
+        assert events[0]["choices"][0]["delta"]["role"] == "assistant"
+        assert events[0]["model"] == "claude-sonnet-4-20250514"
+
+    def test_text_delta_event(self):
+        """text_delta 事件应转换为 Chat chunk with content"""
+        AnthropicConverter.reset_anthropic_to_chat_state()
+        # 先发 message_start
+        AnthropicConverter.convert_anthropic_event_to_chat("message_start", {
+            "message": {"id": "msg_123", "model": "claude-sonnet-4-20250514", "usage": {}}
+        })
+        events = AnthropicConverter.convert_anthropic_event_to_chat("content_block_delta", {
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "Hello"}
+        })
+        assert len(events) == 1
+        assert events[0]["choices"][0]["delta"]["content"] == "Hello"
+
+    def test_thinking_delta_event(self):
+        """thinking_delta 事件应转换为 Chat chunk with reasoning_content"""
+        AnthropicConverter.reset_anthropic_to_chat_state()
+        AnthropicConverter.convert_anthropic_event_to_chat("message_start", {
+            "message": {"id": "msg_123", "model": "claude-sonnet-4-20250514", "usage": {}}
+        })
+        events = AnthropicConverter.convert_anthropic_event_to_chat("content_block_delta", {
+            "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": "Let me think..."}
+        })
+        assert len(events) == 1
+        assert events[0]["choices"][0]["delta"]["reasoning_content"] == "Let me think..."
+
+    def test_input_json_delta_event(self):
+        """input_json_delta 事件应转换为 Chat chunk with tool_calls"""
+        AnthropicConverter.reset_anthropic_to_chat_state()
+        AnthropicConverter.convert_anthropic_event_to_chat("message_start", {
+            "message": {"id": "msg_123", "model": "claude-sonnet-4-20250514", "usage": {}}
+        })
+        # 先发 content_block_start with tool_use
+        AnthropicConverter.convert_anthropic_event_to_chat("content_block_start", {
+            "index": 0,
+            "content_block": {"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {}}
+        })
+        events = AnthropicConverter.convert_anthropic_event_to_chat("content_block_delta", {
+            "index": 0,
+            "delta": {"type": "input_json_delta", "partial_json": '{"city":'}
+        })
+        assert len(events) == 1
+        assert events[0]["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"] == '{"city":'
+
+    def test_message_delta_event(self):
+        """message_delta 事件应转换为 Chat chunk with finish_reason"""
+        AnthropicConverter.reset_anthropic_to_chat_state()
+        AnthropicConverter.convert_anthropic_event_to_chat("message_start", {
+            "message": {"id": "msg_123", "model": "claude-sonnet-4-20250514", "usage": {}}
+        })
+        events = AnthropicConverter.convert_anthropic_event_to_chat("message_delta", {
+            "delta": {"stop_reason": "end_turn"},
+            "usage": {"output_tokens": 50}
+        })
+        assert len(events) == 1
+        assert events[0]["choices"][0]["finish_reason"] == "stop"
+
+    def test_message_delta_tool_use_stop(self):
+        """message_delta tool_use stop_reason → finish_reason=tool_calls"""
+        AnthropicConverter.reset_anthropic_to_chat_state()
+        AnthropicConverter.convert_anthropic_event_to_chat("message_start", {
+            "message": {"id": "msg_123", "model": "claude-sonnet-4-20250514", "usage": {}}
+        })
+        events = AnthropicConverter.convert_anthropic_event_to_chat("message_delta", {
+            "delta": {"stop_reason": "tool_use"},
+            "usage": {"output_tokens": 50}
+        })
+        assert events[0]["choices"][0]["finish_reason"] == "tool_calls"
+
+    def test_message_start_with_cached_tokens(self):
+        """message_start 包含缓存 token 信息"""
+        AnthropicConverter.reset_anthropic_to_chat_state()
+        events = AnthropicConverter.convert_anthropic_event_to_chat("message_start", {
+            "message": {
+                "id": "msg_123",
+                "model": "claude-sonnet-4-20250514",
+                "usage": {"input_tokens": 100, "output_tokens": 0, "cache_read_input_tokens": 80}
+            }
+        })
+        assert events[0]["usage"]["prompt_tokens_details"]["cached_tokens"] == 80
+
+
+class TestChatToAnthropicReasoningSummaryToDisplay:
+    """测试 Chat→Anthropic 路径 reasoning.summary → thinking.display 映射"""
+
+    def test_reasoning_effort_with_extra_body_reasoning_summary(self):
+        """reasoning_effort + extra_body.reasoning.summary → thinking.display"""
+        request = {
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "reasoning_effort": "medium",
+            "extra_body": {
+                "reasoning": {"effort": "medium", "summary": "concise"},
+            },
+        }
+        config = ConverterConfig(backend_type="anthropic")
+        engine = ProtocolConverterEngine(config)
+        result = engine.convert_request(request)
+        assert result["thinking"]["type"] == "enabled"
+        assert result["thinking"]["display"] == "summarized"

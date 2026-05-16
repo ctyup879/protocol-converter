@@ -510,6 +510,12 @@ class ProtocolConverterEngine:
                     original_thinking = request["extra_body"].get("thinking")
                     if isinstance(original_thinking, dict) and original_thinking.get("display"):
                         thinking_config["display"] = original_thinking["display"]
+                    # 如果 extra_body 中有 reasoning 配置（从 Responses 转换过来的），提取 summary → display
+                    original_reasoning = request["extra_body"].get("reasoning")
+                    if isinstance(original_reasoning, dict) and original_reasoning.get("summary") is not None:
+                        summary = original_reasoning["summary"]
+                        if summary in ("concise", "detailed"):
+                            thinking_config["display"] = "summarized"
                 anthropic_request["thinking"] = thinking_config
             else:
                 anthropic_request["thinking"] = {"type": "disabled"}
@@ -999,22 +1005,49 @@ class ProtocolConverterEngine:
                     
                     # Anthropic 后端返回 Anthropic SSE 格式数据
                     if backend_format == "anthropic":
+                        event_type = pending_event_type or chunk.get("type", "")
+                        pending_event_type = None
+                        
                         if source_protocol == Protocol.ANTHROPIC:
                             # Anthropic→Anthropic: 直接转发原始 SSE
-                            event_type = pending_event_type or chunk.get("type", "message_delta")
                             if event_type:
                                 yield f"event: {event_type}\ndata: {json.dumps(chunk, ensure_ascii=False)}\n\n"
                             else:
                                 yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
-                            pending_event_type = None
                             continue
                         else:
-                            # Anthropic→Chat/Responses: 需要将 Anthropic SSE 事件转换为 Chat 格式
-                            # 然后再转换为目标协议
-                            # 暂时将 Anthropic 事件类型附加到 chunk 中
-                            if pending_event_type:
-                                chunk["_anthropic_event_type"] = pending_event_type
+                            # Anthropic→Chat/Responses: 将 Anthropic SSE 事件转换为 Chat 格式
+                            chat_chunks = self.anthropic.convert_anthropic_event_to_chat(event_type, chunk)
+                            
+                            # 将 Chat 格式块转换为目标协议
+                            for chat_chunk in chat_chunks:
+                                stream_chunks = self.convert_stream_chunk_multi(chat_chunk, source_protocol)
+                                for sc in stream_chunks:
+                                    if source_protocol == Protocol.ANTHROPIC:
+                                        yield sc.to_anthropic_sse()
+                                    elif source_protocol == Protocol.OPENAI_RESPONSES:
+                                        yield sc.to_sse()
+                                    else:
+                                        yield sc.to_openai_chunk()
+                            continue
+                    
                     pending_event_type = None
+                    
+                    # Responses 后端使用命名 SSE 事件
+                    if backend_format == "openai_responses":
+                        # Responses→Responses: 直接转发原始 SSE
+                        if source_protocol == Protocol.OPENAI_RESPONSES:
+                            if pending_event_type is not None:
+                                yield f"event: {pending_event_type}\ndata: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+                                pending_event_type = None
+                            else:
+                                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+                            continue
+                        # Responses→Chat/Anthropic: 当前假设 Responses 后端返回 Responses 格式事件
+                        # 大多数 Responses 兼容后端（如 OpenRouter）实际返回 Chat 格式 SSE
+                        # 对于真正的 Responses 格式后端，需要额外的转换器
+                        # 目前直接使用 Chat 格式块处理
+                        pending_event_type = None
                     
                     # 使用多事件转换，以支持 Anthropic 的一对多映射
                     stream_chunks = self.convert_stream_chunk_multi(chunk, source_protocol)

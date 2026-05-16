@@ -1075,9 +1075,10 @@ class OpenAIResponsesConverter:
         tool_choice = cls._convert_tool_choice_to_anthropic(request.get("tool_choice"))
         
         # 5. 构建 Anthropic 请求
+        max_output_tokens = request.get("max_output_tokens")
         anthropic_request = {
             "model": request.get("model", "claude-sonnet-4-20250514"),
-            "max_tokens": request.get("max_output_tokens", 4096),
+            "max_tokens": max_output_tokens if max_output_tokens is not None else 4096,
             "messages": anthropic_messages,
         }
         
@@ -1093,6 +1094,21 @@ class OpenAIResponsesConverter:
             anthropic_request["tools"] = anthropic_tools
         if tool_choice is not None:
             anthropic_request["tool_choice"] = tool_choice
+        
+        # 5.5 处理 parallel_tool_calls → disable_parallel_tool_use
+        # Anthropic API: disable_parallel_tool_use 是 tool_choice 的子字段，无法独立设置
+        parallel_tool_calls = request.get("parallel_tool_calls")
+        disable_parallel = parallel_tool_calls is False
+        
+        if disable_parallel:
+            current_tc = anthropic_request.get("tool_choice")
+            if isinstance(current_tc, dict):
+                current_tc["disable_parallel_tool_use"] = True
+            elif isinstance(current_tc, str) and current_tc in ("auto", "any"):
+                anthropic_request["tool_choice"] = {"type": current_tc, "disable_parallel_tool_use": True}
+            else:
+                # 无显式 tool_choice 或 tool_choice="none"
+                anthropic_request["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": True}
         
         # 6. reasoning -> thinking
         reasoning = request.get("reasoning")
@@ -1110,6 +1126,15 @@ class OpenAIResponsesConverter:
                 budget = effort_budget_map.get(effort, 10000)
                 if budget > 0:
                     thinking_config = {"type": "enabled", "budget_tokens": budget}
+                    # reasoning.summary → thinking.display 映射
+                    # Responses: summary: "auto" | "concise" | "detailed" | None
+                    # Anthropic: display: "summarized" | "omitted"
+                    summary = reasoning.get("summary")
+                    if summary is not None:
+                        # "concise"/"detailed" → "summarized" (返回可见推理摘要)
+                        # None/"auto" → 不设置 display (使用 Anthropic 默认行为)
+                        if summary in ("concise", "detailed"):
+                            thinking_config["display"] = "summarized"
                     anthropic_request["thinking"] = thinking_config
                 else:
                     anthropic_request["thinking"] = {"type": "disabled"}
@@ -1140,8 +1165,13 @@ class OpenAIResponsesConverter:
             user_id = metadata.get("user_id")
             if user_id:
                 anthropic_request["metadata"] = {"user_id": user_id}
-            # 保留完整 metadata
-            anthropic_request["metadata"] = metadata
+            # Anthropic API 仅支持 metadata.user_id 字段
+            # 其他字段保留在 extra_body 中
+            non_user_fields = {k: v for k, v in metadata.items() if k != "user_id"}
+            if non_user_fields:
+                if "extra_body" not in anthropic_request:
+                    anthropic_request["extra_body"] = {}
+                anthropic_request["extra_body"]["metadata"] = non_user_fields
         
         # 9. service_tier 映射
         if request.get("service_tier"):
@@ -1191,7 +1221,9 @@ class OpenAIResponsesConverter:
         if request.get("stop"):
             extra["stop"] = request["stop"]
         if extra:
-            anthropic_request["extra_body"] = extra
+            if "extra_body" not in anthropic_request:
+                anthropic_request["extra_body"] = {}
+            anthropic_request["extra_body"].update(extra)
         
         return anthropic_request
     

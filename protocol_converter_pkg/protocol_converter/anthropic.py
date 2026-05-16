@@ -1100,6 +1100,228 @@ class AnthropicConverter:
         return [{"type": "ping"}]
     
     # ================================================================
+    # 流式转换：Anthropic SSE → Chat Stream
+    # ================================================================
+
+    # 流式状态（Anthropic → Chat 转换专用）
+    _anthropic_to_chat_state = {
+        "msg_id": None,
+        "model": None,
+        "tool_call_index": 0,
+        "started_tool_ids": set(),
+    }
+
+    @classmethod
+    def reset_anthropic_to_chat_state(cls):
+        """重置 Anthropic → Chat 流式转换状态"""
+        cls._anthropic_to_chat_state = {
+            "msg_id": None,
+            "model": None,
+            "tool_call_index": 0,
+            "started_tool_ids": set(),
+        }
+
+    @classmethod
+    def convert_anthropic_event_to_chat(cls, event_type: str, data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        将 Anthropic SSE 事件转换为 OpenAI Chat 流式块列表
+
+        用于 Anthropic 后端流式响应 → Chat 目标协议的转换场景。
+
+        Returns:
+            List[Dict]: OpenAI Chat 格式的流式块列表
+        """
+        chunks = []
+
+        if event_type == "message_start":
+            cls.reset_anthropic_to_chat_state()
+            msg = data.get("message", {})
+            cls._anthropic_to_chat_state["msg_id"] = msg.get("id", f"chatcmpl-{uuid.uuid4().hex[:24]}")
+            cls._anthropic_to_chat_state["model"] = msg.get("model", "")
+            usage = msg.get("usage", {})
+            chunk = {
+                "id": cls._anthropic_to_chat_state["msg_id"],
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": cls._anthropic_to_chat_state["model"],
+                "choices": [{
+                    "index": 0,
+                    "delta": {"role": "assistant", "content": ""},
+                    "finish_reason": None
+                }],
+                "usage": {
+                    "prompt_tokens": usage.get("input_tokens", 0),
+                    "completion_tokens": 0,
+                    "total_tokens": usage.get("input_tokens", 0),
+                }
+            }
+            if usage.get("cache_read_input_tokens"):
+                chunk["usage"]["prompt_tokens_details"] = {"cached_tokens": usage["cache_read_input_tokens"]}
+            chunks.append(chunk)
+            return chunks
+
+        elif event_type == "content_block_start":
+            content_block = data.get("content_block", {})
+            block_type = content_block.get("type", "")
+            if block_type == "tool_use":
+                tc_id = content_block.get("id", f"call_{uuid.uuid4().hex[:24]}")
+                tc_name = content_block.get("name", "")
+                tc_idx = cls._anthropic_to_chat_state["tool_call_index"]
+                cls._anthropic_to_chat_state["started_tool_ids"].add(tc_id)
+                cls._anthropic_to_chat_state[f"_tc_idx_{tc_id}"] = tc_idx
+                cls._anthropic_to_chat_state["tool_call_index"] = tc_idx + 1
+                chunk = {
+                    "id": cls._anthropic_to_chat_state["msg_id"],
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": cls._anthropic_to_chat_state["model"],
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [{
+                                "index": tc_idx,
+                                "id": tc_id,
+                                "type": "function",
+                                "function": {"name": tc_name, "arguments": ""}
+                            }]
+                        },
+                        "finish_reason": None
+                    }]
+                }
+                chunks.append(chunk)
+            return chunks
+
+        elif event_type == "content_block_delta":
+            delta_data = data.get("delta", {})
+            delta_type = delta_data.get("type", "")
+
+            if delta_type == "text_delta":
+                text = delta_data.get("text", "")
+                if text:
+                    chunk = {
+                        "id": cls._anthropic_to_chat_state["msg_id"],
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "model": cls._anthropic_to_chat_state["model"],
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"content": text},
+                            "finish_reason": None
+                        }]
+                    }
+                    chunks.append(chunk)
+
+            elif delta_type == "thinking_delta":
+                thinking_text = delta_data.get("thinking", "")
+                if thinking_text:
+                    chunk = {
+                        "id": cls._anthropic_to_chat_state["msg_id"],
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "model": cls._anthropic_to_chat_state["model"],
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"reasoning_content": thinking_text},
+                            "finish_reason": None
+                        }]
+                    }
+                    chunks.append(chunk)
+
+            elif delta_type == "input_json_delta":
+                partial_json = delta_data.get("partial_json", "")
+                if partial_json:
+                    block_index = data.get("index", 0)
+                    tc_id = None
+                    tc_idx = 0
+                    for tid in cls._anthropic_to_chat_state["started_tool_ids"]:
+                        idx = cls._anthropic_to_chat_state.get(f"_tc_idx_{tid}", 0)
+                        if idx == block_index:
+                            tc_id = tid
+                            tc_idx = idx
+                            break
+                    if tc_id is None:
+                        tc_idx = block_index
+
+                    tc_delta = {
+                        "index": tc_idx,
+                        "function": {"arguments": partial_json}
+                    }
+                    if tc_id:
+                        tc_delta["id"] = tc_id
+                    chunk = {
+                        "id": cls._anthropic_to_chat_state["msg_id"],
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "model": cls._anthropic_to_chat_state["model"],
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"tool_calls": [tc_delta]},
+                            "finish_reason": None
+                        }]
+                    }
+                    chunks.append(chunk)
+
+            elif delta_type == "signature_delta":
+                pass
+
+            elif delta_type == "citations_delta":
+                pass
+
+            return chunks
+
+        elif event_type == "content_block_stop":
+            return chunks
+
+        elif event_type == "message_delta":
+            usage_data = data.get("usage", {})
+            delta_data = data.get("delta", {})
+            stop_reason = delta_data.get("stop_reason", "end_turn")
+            finish_reason = cls.REVERSE_STOP_REASON_MAP.get(stop_reason, "stop")
+
+            chunk = {
+                "id": cls._anthropic_to_chat_state["msg_id"],
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": cls._anthropic_to_chat_state["model"],
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": finish_reason
+                }],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "completion_tokens": usage_data.get("output_tokens", 0),
+                    "total_tokens": usage_data.get("output_tokens", 0),
+                }
+            }
+            chunks.append(chunk)
+            return chunks
+
+        elif event_type == "message_stop":
+            return chunks
+
+        elif event_type == "ping":
+            return chunks
+
+        elif event_type == "error":
+            error = data.get("error", {})
+            chunk = {
+                "id": cls._anthropic_to_chat_state["msg_id"] or f"chatcmpl-{uuid.uuid4().hex[:24]}",
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": cls._anthropic_to_chat_state["model"] or "",
+                "choices": [{
+                    "index": 0,
+                    "delta": {"content": f"\n[Error] {error.get('message', 'Unknown error')}"},
+                    "finish_reason": "stop"
+                }]
+            }
+            chunks.append(chunk)
+            return chunks
+
+        return chunks
+    
+    # ================================================================
     # 响应转换：Anthropic -> OpenAI Responses
     # ================================================================
     
