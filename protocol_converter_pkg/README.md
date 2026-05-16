@@ -448,7 +448,7 @@ protocol_converter_pkg/
 │   ├── openai_responses.py     # OpenAI Responses 转换器
 │   └── engine.py                # 核心转换引擎
 ├── tests/
-│   └── test_protocol_converter.py   # 300 个单元测试
+│   └── test_protocol_converter.py   # 312 个单元测试
 ├── examples/
 │   ├── integration_test_chat_backend.py       # OpenAI Chat 后端集成测试
 │   ├── integration_test_anthropic_backend.py  # Anthropic 后端集成测试
@@ -479,17 +479,19 @@ pip install pytest pytest-asyncio httpx
 | pytest-asyncio | ≥ 0.21.0 | 异步测试支持 | 开发必需 |
 | pytest-cov | ≥ 4.0.0 | 测试覆盖率 | 开发可选 |
 
+> **审查参考**：协议转换逻辑的审查基于以下官方资料：OpenAI Chat Completions API 文档、OpenAI Responses API 文档、Anthropic Messages API 文档、`openai-python` SDK v2.11 源码、`anthropic-sdk-python` 源码，以及 Context7 实时文档检索。
+
 ### 执行单元测试
 
 ```bash
-# 运行全部 300 个单元测试
+# 运行全部 312 个单元测试
 python3 -m pytest tests/ -v
 
 # 运行带覆盖率的测试
 python3 -m pytest tests/ -v --cov=protocol_converter
 
 # 运行特定测试类
-python3 -m pytest tests/ -v -k "TestProtocolDetector"
+python3 -m pytest tests/ -v -k "TestAnthropicThinkingWithText"
 ```
 
 ### 执行集成测试
@@ -521,6 +523,19 @@ python3 examples/integration_test_all_9_paths.py
 - [anthropic-sdk-python](https://github.com/anthropics/anthropic-sdk-python)
 
 ## 更新日志
+
+### v1.15.0
+
+基于官方文档、Context7 和 Python SDK（`openai-python` v2.11、`anthropic-sdk-python`）全面审查后修复协议转换缺陷并完善逻辑：
+
+- **Anthropic→Chat thinking 块内容丢失修复**：`AnthropicConverter._convert_message` 在 assistant 消息同时包含 `thinking` 和 `text` 块时，`thinking` 内容现正确映射为 Chat `reasoning_content` 字段（之前仅在 `content=None` 且无 `tool_calls` 时才保留，导致有文本内容时推理信息完全丢失）
+- **Chat→Responses assistant 列表内容 + reasoning_content 转换修复**：`from_openai_chat_request` 在 assistant 消息有列表类型 `content` 和 `reasoning_content`（无 `tool_calls`）时，`reasoning_content` 现正确映射为 Responses `reasoning` 输入项（之前仅处理字符串类型 content 的 reasoning_content，列表类型场景遗漏）
+- **Chat→Anthropic tool 消息列表内容转换修复**：`_chat_to_anthropic_request` 在 Chat `tool` 消息的 `content` 为列表（多模态工具结果）时，现正确转换为 Anthropic `tool_result` 的 content 块列表（之前使用 `str(content)` 将列表转为字符串表示，丢失内容结构）
+- **Chat→Anthropic tool 列表内容 `[Error]` 前缀检测**：列表类型 tool content 中的 `[Error]` 前缀现正确检测并映射为 Anthropic `tool_result.is_error` 字段
+- **Responses→Chat `reasoning_summary_text.delta` 事件处理**：`_convert_responses_event_to_chat_chunk` 新增 `response.reasoning_summary_text.delta` 事件到 Chat `reasoning_content` 的映射（之前该事件被丢弃，导致推理摘要内容丢失）
+- **Responses→Chat `response.refusal.delta` 事件处理**：`_convert_responses_event_to_chat_chunk` 新增 `response.refusal.delta` 事件到 Chat `content` delta 的映射（之前拒绝内容增量被丢弃）
+- **312 个单元测试**（新增 12 个覆盖上述修复）
+- **9 路集成测试全部通过**
 
 ### v1.14.0
 

@@ -864,6 +864,13 @@ class OpenAIResponsesConverter:
                     })
                 elif isinstance(content, list):
                     # 多模态内容
+                    # 处理 assistant 消息的 reasoning_content（列表内容场景）
+                    if role == "assistant" and msg.get("reasoning_content"):
+                        input_items.append({
+                            "type": "reasoning",
+                            "id": f"rs_{uuid.uuid4().hex[:24]}",
+                            "summary": [{"type": "summary_text", "text": msg["reasoning_content"]}]
+                        })
                     content_items = cls._convert_chat_content_to_responses(content)
                     input_items.append({
                         "type": "message",
@@ -2661,6 +2668,20 @@ class OpenAIResponsesConverter:
                 }]
             }
         
+        elif event_type == "response.reasoning_summary_text.delta":
+            # 推理摘要文本增量 - 映射为 reasoning_content
+            return {
+                "id": data.get("response", {}).get("id", ""),
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": data.get("response", {}).get("model", ""),
+                "choices": [{
+                    "index": 0,
+                    "delta": {"reasoning_content": data.get("delta", "")},
+                    "finish_reason": None
+                }]
+            }
+        
         elif event_type in ("response.completed", "response.failed", "response.incomplete"):
             # 响应完成/失败/不完整
             resp_data = data.get("response", {})
@@ -2694,5 +2715,19 @@ class OpenAIResponsesConverter:
                 }
             }
             return chunk
+        
+        elif event_type == "response.refusal.delta":
+            # 拒绝内容增量 - 映射为 Chat content delta
+            return {
+                "id": data.get("response", {}).get("id", ""),
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": data.get("response", {}).get("model", ""),
+                "choices": [{
+                    "index": 0,
+                    "delta": {"content": data.get("delta", "")},
+                    "finish_reason": None
+                }]
+            }
         
         return None

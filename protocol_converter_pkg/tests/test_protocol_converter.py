@@ -5424,7 +5424,7 @@ class TestAssistantThinkingOnlyBlock:
         assert result[0]["reasoning_content"] == "Let me analyze this..."
 
     def test_assistant_thinking_and_text(self):
-        """assistant 消息含 thinking + text 块时 reasoning_content 不重复"""
+        """assistant 消息含 thinking + text 块时 reasoning_content 正确保留"""
         msg = {
             "role": "assistant",
             "content": [
@@ -5436,8 +5436,8 @@ class TestAssistantThinkingOnlyBlock:
         assert len(result) == 1
         assert result[0]["role"] == "assistant"
         assert result[0]["content"] == "Answer"
-        # thinking 块被跳过，text 内容正常
-        assert "reasoning_content" not in result[0]
+        # Chat API 支持同时包含 content 和 reasoning_content
+        assert result[0].get("reasoning_content") == "Thinking..."
 
     def test_assistant_redacted_thinking_only(self):
         """assistant 消息只含 redacted_thinking 块时 content 为 None"""
@@ -5815,3 +5815,284 @@ class TestResponsesEventToChatChunk:
             "response.ping", data
         )
         assert result is None
+
+
+# ================================================================
+# v1.15.0 Bug Fix Tests
+# ================================================================
+
+class TestAnthropicThinkingWithText:
+    """测试 Anthropic→Chat 转换中 thinking 块与 text 块同时存在时的处理"""
+
+    def test_thinking_with_text_preserves_reasoning_content(self):
+        """thinking 块与 text 块同时存在时，reasoning_content 不应丢失"""
+        anthropic_request = {
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1024,
+            "messages": [
+                {"role": "user", "content": "Explain quantum computing"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "I need to explain quantum computing clearly...", "signature": "abc123"},
+                        {"type": "text", "text": "Quantum computing uses qubits..."}
+                    ]
+                }
+            ]
+        }
+        result = AnthropicConverter.to_openai_chat(anthropic_request)
+        msg = result["messages"][-1]
+        assert msg["role"] == "assistant"
+        assert msg["content"] == "Quantum computing uses qubits..."
+        # 关键：reasoning_content 不应丢失
+        assert msg.get("reasoning_content") == "I need to explain quantum computing clearly..."
+
+    def test_thinking_with_text_and_tool_calls(self):
+        """thinking 块、text 块和 tool_calls 同时存在时，reasoning_content 不应丢失"""
+        anthropic_request = {
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1024,
+            "messages": [
+                {"role": "user", "content": "What's the weather?"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "User wants weather info...", "signature": "sig123"},
+                        {"type": "text", "text": "Let me check the weather."},
+                        {"type": "tool_use", "id": "toolu_123", "name": "get_weather", "input": {"city": "NYC"}}
+                    ]
+                }
+            ]
+        }
+        result = AnthropicConverter.to_openai_chat(anthropic_request)
+        msg = result["messages"][-1]
+        assert msg["role"] == "assistant"
+        assert msg["content"] == "Let me check the weather."
+        assert msg.get("reasoning_content") == "User wants weather info..."
+        assert len(msg.get("tool_calls", [])) == 1
+
+    def test_thinking_only_still_preserves_reasoning_content(self):
+        """仅含 thinking 块时 reasoning_content 仍然正确保留（回归测试）"""
+        anthropic_request = {
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1024,
+            "messages": [
+                {"role": "user", "content": "Think about this"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "Deep thoughts...", "signature": "sig456"}
+                    ]
+                }
+            ]
+        }
+        result = AnthropicConverter.to_openai_chat(anthropic_request)
+        msg = result["messages"][-1]
+        assert msg["role"] == "assistant"
+        assert msg["content"] is None
+        assert msg.get("reasoning_content") == "Deep thoughts..."
+
+
+class TestChatToResponsesReasoningWithListContent:
+    """测试 Chat→Responses 转换中 assistant 消息有列表 content 和 reasoning_content 的场景"""
+
+    def test_assistant_list_content_with_reasoning_content(self):
+        """assistant 消息有列表 content 和 reasoning_content 时，reasoning 应正确映射"""
+        chat_request = {
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "user", "content": "Analyze this image"},
+                {
+                    "role": "assistant",
+                    "reasoning_content": "I see a landscape...",
+                    "content": [
+                        {"type": "text", "text": "This is a beautiful landscape."},
+                        {"type": "image_url", "image_url": {"url": "https://example.com/img.png"}}
+                    ]
+                }
+            ]
+        }
+        result = OpenAIResponsesConverter.from_openai_chat_request(chat_request)
+        input_items = result.get("input", [])
+        # 应包含 reasoning 输入项
+        reasoning_items = [item for item in input_items if isinstance(item, dict) and item.get("type") == "reasoning"]
+        assert len(reasoning_items) == 1
+        assert reasoning_items[0]["summary"][0]["text"] == "I see a landscape..."
+        # 应包含 assistant message 输入项
+        assistant_msgs = [item for item in input_items if isinstance(item, dict) and item.get("type") == "message" and item.get("role") == "assistant"]
+        assert len(assistant_msgs) == 1
+
+    def test_assistant_string_content_with_reasoning_content(self):
+        """assistant 消息有字符串 content 和 reasoning_content 时仍正确（回归测试）"""
+        chat_request = {
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {
+                    "role": "assistant",
+                    "reasoning_content": "Thinking...",
+                    "content": "Hi there!"
+                }
+            ]
+        }
+        result = OpenAIResponsesConverter.from_openai_chat_request(chat_request)
+        input_items = result.get("input", [])
+        reasoning_items = [item for item in input_items if isinstance(item, dict) and item.get("type") == "reasoning"]
+        assert len(reasoning_items) == 1
+        assistant_msgs = [item for item in input_items if isinstance(item, dict) and item.get("type") == "message" and item.get("role") == "assistant"]
+        assert len(assistant_msgs) == 1
+
+
+class TestChatToAnthropicToolListContent:
+    """测试 Chat→Anthropic 转换中 tool 消息有列表 content 的场景"""
+
+    def test_tool_message_with_list_content(self):
+        """tool 消息的 content 为列表时应正确转换为 Anthropic tool_result content 块"""
+        config = ConverterConfig(backend_type="anthropic")
+        engine = ProtocolConverterEngine(config)
+        chat_request = {
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "user", "content": "What's the weather?"},
+                {"role": "assistant", "content": None, "tool_calls": [{"id": "call_123", "type": "function", "function": {"name": "get_weather", "arguments": "{}"}}]},
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_123",
+                    "content": [
+                        {"type": "text", "text": "Temperature: 72°F"},
+                        {"type": "text", "text": "Humidity: 45%"}
+                    ]
+                }
+            ]
+        }
+        result = engine.convert_request(chat_request)
+        # 找到 tool_result 块
+        user_msgs = [m for m in result.get("messages", []) if m.get("role") == "user"]
+        tool_result_found = False
+        for msg in user_msgs:
+            for block in msg.get("content", []):
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    tool_result_found = True
+                    # content 应该是列表，不是字符串化的列表
+                    assert isinstance(block.get("content"), list), f"Expected list, got {type(block.get('content'))}"
+                    assert len(block["content"]) == 2
+                    assert block["content"][0].get("text") == "Temperature: 72°F"
+        assert tool_result_found, "tool_result block not found"
+
+    def test_tool_message_with_string_content(self):
+        """tool 消息的 content 为字符串时仍正确（回归测试）"""
+        config = ConverterConfig(backend_type="anthropic")
+        engine = ProtocolConverterEngine(config)
+        chat_request = {
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": None, "tool_calls": [{"id": "call_123", "type": "function", "function": {"name": "test", "arguments": "{}"}}]},
+                {"role": "tool", "tool_call_id": "call_123", "content": "Result: OK"}
+            ]
+        }
+        result = engine.convert_request(chat_request)
+        user_msgs = [m for m in result.get("messages", []) if m.get("role") == "user"]
+        tool_result_found = False
+        for msg in user_msgs:
+            for block in msg.get("content", []):
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    tool_result_found = True
+                    assert block.get("content") == "Result: OK"
+        assert tool_result_found
+
+    def test_tool_message_list_content_with_error_prefix(self):
+        """tool 消息的列表 content 中 [Error] 前缀应正确映射为 is_error"""
+        config = ConverterConfig(backend_type="anthropic")
+        engine = ProtocolConverterEngine(config)
+        chat_request = {
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": None, "tool_calls": [{"id": "call_123", "type": "function", "function": {"name": "test", "arguments": "{}"}}]},
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_123",
+                    "content": [
+                        {"type": "text", "text": "[Error] API rate limit exceeded"}
+                    ]
+                }
+            ]
+        }
+        result = engine.convert_request(chat_request)
+        user_msgs = [m for m in result.get("messages", []) if m.get("role") == "user"]
+        tool_result_found = False
+        for msg in user_msgs:
+            for block in msg.get("content", []):
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    tool_result_found = True
+                    assert block.get("is_error") is True
+                    # [Error] 前缀应被去掉
+                    assert block["content"][0].get("text") == "API rate limit exceeded"
+        assert tool_result_found
+
+
+class TestResponsesReasoningSummaryTextDelta:
+    """测试 Responses→Chat 中 reasoning_summary_text.delta 事件的转换"""
+
+    def test_reasoning_summary_text_delta(self):
+        """response.reasoning_summary_text.delta 应映射为 reasoning_content"""
+        data = {
+            "type": "response.reasoning_summary_text.delta",
+            "output_index": 0,
+            "delta": "Summary of reasoning...",
+            "response": {"id": "resp_123", "model": "o3"}
+        }
+        result = OpenAIResponsesConverter._convert_responses_event_to_chat_chunk(
+            "response.reasoning_summary_text.delta", data
+        )
+        assert result is not None
+        assert result["choices"][0]["delta"]["reasoning_content"] == "Summary of reasoning..."
+
+    def test_reasoning_summary_text_delta_empty(self):
+        """reasoning_summary_text.delta 为空字符串时应正确处理"""
+        data = {
+            "type": "response.reasoning_summary_text.delta",
+            "output_index": 0,
+            "delta": "",
+            "response": {"id": "resp_123", "model": "o3"}
+        }
+        result = OpenAIResponsesConverter._convert_responses_event_to_chat_chunk(
+            "response.reasoning_summary_text.delta", data
+        )
+        assert result is not None
+        assert result["choices"][0]["delta"]["reasoning_content"] == ""
+
+
+class TestResponsesRefusalDelta:
+    """测试 Responses→Chat 中 response.refusal.delta 事件的转换"""
+
+    def test_refusal_delta(self):
+        """response.refusal.delta 应映射为 Chat content delta"""
+        data = {
+            "type": "response.refusal.delta",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "I cannot assist with that.",
+            "response": {"id": "resp_123", "model": "gpt-4o"}
+        }
+        result = OpenAIResponsesConverter._convert_responses_event_to_chat_chunk(
+            "response.refusal.delta", data
+        )
+        assert result is not None
+        assert result["choices"][0]["delta"]["content"] == "I cannot assist with that."
+
+    def test_refusal_delta_empty(self):
+        """response.refusal.delta 为空字符串时应正确处理"""
+        data = {
+            "type": "response.refusal.delta",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "",
+            "response": {"id": "resp_123", "model": "gpt-4o"}
+        }
+        result = OpenAIResponsesConverter._convert_responses_event_to_chat_chunk(
+            "response.refusal.delta", data
+        )
+        assert result is not None
+        assert result["choices"][0]["delta"]["content"] == ""

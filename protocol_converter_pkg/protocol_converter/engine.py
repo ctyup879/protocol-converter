@@ -276,16 +276,46 @@ class ProtocolConverterEngine:
             
             if role == "tool":
                 # tool 消息转换为 user 消息中的 tool_result 块
-                tool_content = content if isinstance(content, str) else str(content)
+                is_error = False
+                if isinstance(content, str):
+                    tool_content = content
+                    # 检测 [Error] 前缀标记，反向映射为 Anthropic is_error 字段
+                    if tool_content.startswith("[Error] "):
+                        is_error = True
+                        tool_content = tool_content[8:]  # 去掉 "[Error] " 前缀
+                elif isinstance(content, list):
+                    # Chat tool 消息的 content 可能是列表（多模态工具结果）
+                    # 转换为 Anthropic tool_result 的 content 块列表
+                    content_blocks = []
+                    for b in content:
+                        if isinstance(b, dict):
+                            b_type = b.get("type", "")
+                            if b_type == "text":
+                                content_blocks.append({"type": "text", "text": b.get("text", "")})
+                            else:
+                                # 其他类型降级为文本
+                                text = b.get("text", "")
+                                if text:
+                                    content_blocks.append({"type": "text", "text": text})
+                        else:
+                            content_blocks.append({"type": "text", "text": str(b)})
+                    tool_content = content_blocks if content_blocks else str(content)
+                    # 检测列表中第一项文本是否为 [Error] 标记
+                    if (isinstance(tool_content, list) and len(tool_content) > 0
+                            and isinstance(tool_content[0], dict)
+                            and tool_content[0].get("text", "").startswith("[Error] ")):
+                        is_error = True
+                        tool_content[0]["text"] = tool_content[0]["text"][8:]
+                else:
+                    tool_content = str(content) if content is not None else ""
+                
                 tool_result_block = {
                     "type": "tool_result",
                     "tool_use_id": msg.get("tool_call_id", ""),
                     "content": tool_content
                 }
-                # 检测 [Error] 前缀标记，反向映射为 Anthropic is_error 字段
-                if isinstance(tool_content, str) and tool_content.startswith("[Error] "):
+                if is_error:
                     tool_result_block["is_error"] = True
-                    tool_result_block["content"] = tool_content[8:]  # 去掉 "[Error] " 前缀
                 anthropic_messages.append({
                     "role": "user",
                     "content": [tool_result_block]

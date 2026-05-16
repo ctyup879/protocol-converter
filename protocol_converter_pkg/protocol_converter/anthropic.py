@@ -528,18 +528,17 @@ class AnthropicConverter:
                     assistant_msg["content"] = None
                 if tool_calls:
                     assistant_msg["tool_calls"] = tool_calls
-                # 如果 assistant 消息只含 thinking/redacted_thinking 块（无文本无工具），
-                # 将 thinking 内容作为 reasoning_content 保留（OpenAI o系列格式）
-                if assistant_msg["content"] is None and not tool_calls:
-                    thinking_texts = []
-                    for block in content if isinstance(content, list) else []:
-                        if isinstance(block, dict):
-                            if block.get("type") == "thinking":
-                                t = block.get("thinking", "")
-                                if t:
-                                    thinking_texts.append(t)
-                    if thinking_texts:
-                        assistant_msg["reasoning_content"] = "\n".join(thinking_texts)
+                # 将 thinking 块内容映射为 reasoning_content（OpenAI o系列格式）
+                # Chat API 支持同时包含 content 和 reasoning_content，不应仅在无文本时保留
+                thinking_texts = []
+                for block in content if isinstance(content, list) else []:
+                    if isinstance(block, dict):
+                        if block.get("type") == "thinking":
+                            t = block.get("thinking", "")
+                            if t:
+                                thinking_texts.append(t)
+                if thinking_texts:
+                    assistant_msg["reasoning_content"] = "\n".join(thinking_texts)
                 result.append(assistant_msg)
             
             # 构建 user 消息
