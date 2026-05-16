@@ -255,6 +255,8 @@ class ProtocolConverterEngine:
         messages = request.get("messages", [])
         anthropic_messages = []
         system_parts = []
+        system_blocks = []  # 保留含 cache_control 的 system TextBlockParam
+        has_system_cache_control = False
         
         for msg in messages:
             role = msg.get("role", "user")
@@ -266,12 +268,18 @@ class ProtocolConverterEngine:
                     if content:
                         system_parts.append(content)
                 elif isinstance(content, list):
-                    text_parts = []
                     for block in content:
                         if isinstance(block, dict) and block.get("type") == "text":
-                            text_parts.append(block.get("text", ""))
-                    if text_parts:
-                        system_parts.append("\n".join(text_parts))
+                            text = block.get("text", "")
+                            if block.get("cache_control"):
+                                # 保留含 cache_control 的块为 Anthropic TextBlockParam 格式
+                                has_system_cache_control = True
+                                tb = {"type": "text", "text": text}
+                                if isinstance(block["cache_control"], dict):
+                                    tb["cache_control"] = block["cache_control"]
+                                system_blocks.append(tb)
+                            else:
+                                system_parts.append(text)
                 continue
             
             if role == "tool":
@@ -453,7 +461,15 @@ class ProtocolConverterEngine:
         }
         
         system_prompt = "\n\n".join(system_parts) if system_parts else None
-        if system_prompt:
+        if has_system_cache_control:
+            # 含 cache_control 的 system 块必须使用 TextBlockParam[] 格式
+            all_blocks = []
+            if system_prompt:
+                all_blocks.append({"type": "text", "text": system_prompt})
+            all_blocks.extend(system_blocks)
+            if all_blocks:
+                anthropic_request["system"] = all_blocks
+        elif system_prompt:
             anthropic_request["system"] = system_prompt
         if request.get("stream") is not None:
             anthropic_request["stream"] = request["stream"]

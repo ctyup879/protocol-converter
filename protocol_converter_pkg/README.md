@@ -260,7 +260,7 @@ config = ConverterConfig(
 
 | 参数 | 说明 | 转换处理（→ Anthropic） | 转换处理（→ Responses） |
 |------|------|------------------------|----------------------|
-| `verbosity` | 输出详细程度（low/medium/high） | → `extra_body.verbosity` | → `extra_body.verbosity` |
+| `verbosity` | 输出详细程度（low/medium/high） | → `extra_body.verbosity` | → `text.verbosity` |
 | `modalities` | 输出类型（text/audio） | → `extra_body.modalities` | — |
 | `audio` | 音频输出参数 | → `extra_body.audio` | — |
 | `prediction` | 预测内容 | → `extra_body.prediction` | — |
@@ -448,7 +448,7 @@ protocol_converter_pkg/
 │   ├── openai_responses.py     # OpenAI Responses 转换器
 │   └── engine.py                # 核心转换引擎
 ├── tests/
-│   └── test_protocol_converter.py   # 321 个单元测试
+│   └── test_protocol_converter.py   # 332 个单元测试
 ├── examples/
 │   ├── integration_test_chat_backend.py       # OpenAI Chat 后端集成测试
 │   ├── integration_test_anthropic_backend.py  # Anthropic 后端集成测试
@@ -489,7 +489,7 @@ pip install pytest pytest-asyncio httpx
 ### 执行单元测试
 
 ```bash
-# 运行全部 321 个单元测试
+# 运行全部 332 个单元测试
 python3 -m pytest tests/ -v
 
 # 运行带覆盖率的测试
@@ -529,6 +529,38 @@ python3 examples/integration_test_all_9_paths.py
 - [anthropic-sdk-python](https://github.com/anthropics/anthropic-sdk-python)
 
 ## 更新日志
+
+### v1.17.0
+
+基于官方文档、Context7 实时检索和 Python SDK（`openai-python` v2.11、`anthropic-sdk-python`）进行3轮深度审查后修复协议转换缺陷：
+
+**第1轮 — 协议解析与字段映射逻辑缺陷：**
+
+- **`text.verbosity` ↔ Chat `verbosity` 双向映射修复**：Responses API 的 `text.verbosity`（`ResponseTextConfigParam.verbosity`，嵌套在 `text` 配置内）之前错误地放入 `extra_body` 而非映射为 Chat 顶层 `verbosity` 参数。现修正：
+  - Responses→Chat：`text.verbosity` 正确映射为 Chat 顶层 `verbosity`
+  - Chat→Responses：`verbosity` 正确映射为 Responses `text.verbosity`（而非放入 `extra_body`）
+- **`reasoning.generate_summary` 往返保留修复**：OpenAI SDK v2.11 新增 `reasoning.generate_summary` 参数（控制推理摘要生成），之前在 Responses→Chat→Responses 往返转换中丢失。现修正：
+  - Responses→Chat：`reasoning.generate_summary` 与 `reasoning.summary` 一起保留在 `extra_body.reasoning` 中
+  - Chat→Responses：从 `extra_body.reasoning` 中恢复 `generate_summary` 到目标 `reasoning` 配置
+- **Responses→Anthropic `text.verbosity` 保留**：`to_anthropic_request()` 现将 `text.verbosity` 保留到 `extra_body.verbosity`，供 Anthropic 兼容后端使用
+- **Responses→Anthropic `reasoning.generate_summary` 保留**：`to_anthropic_request()` 现将 `reasoning.generate_summary` 保留到 `extra_body` 中
+
+**第2轮 — 异常处理遗漏与边界条件漏洞：**
+
+- **Chat→Anthropic system `cache_control` 保留修复**：Chat 请求的 system 消息内容块带 `cache_control` 时（如 `[{"type": "text", "text": "...", "cache_control": {"type": "ephemeral"}}]`），之前在转换中丢失 `cache_control` 字段。现修正：
+  - `engine.py` 的 `_chat_to_anthropic_request()` 检测 system 消息中的 `cache_control`，使用 Anthropic `TextBlockParam[]` 格式（而非扁平字符串）构造 `system` 参数
+  - `anthropic.py` 的 `_convert_system_blocks` 在 Anthropic→Chat 反向转换时保留 `cache_control`
+- **`_convert_content_to_anthropic` 空内容返回类型修复**：`openai_responses.py` 中当内容为空时之前返回 `""`（字符串），但调用方 `_convert_input_item_to_anthropic` 在 `tool_result` 场景中期望内容块列表。现修正为返回 `[{"type": "text", "text": ""}]`
+
+**第3轮 — 数据类型转换校验及交叉复查：**
+
+- **`openai_responses.py` 局部 `import json as _json` 不一致修复**：方法内使用 `import json as _json` 与模块级 `import json` 不一致，导致不同代码路径使用不同的 `json` 引用。统一使用模块级 `import json`
+- **参数映射表修正**：README 中 Chat→Responses 的 `verbosity` 映射目标从 `extra_body.verbosity` 修正为 `text.verbosity`
+
+**测试覆盖：**
+
+- 新增 11 个单元测试（4 个 `TestVerbosityMapping`、3 个 `TestReasoningGenerateSummary`、2 个 `TestSystemCacheControl`、2 个 `TestConvertContentToAnthropicEmpty`）
+- 全部 332 个单元测试通过
 
 ### v1.16.0
 

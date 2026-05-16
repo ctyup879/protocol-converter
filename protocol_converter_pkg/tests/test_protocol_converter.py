@@ -6273,3 +6273,177 @@ class TestResponsesFunctionCallOutputToAnthropic:
         assert result is not None
         content = result["content"]
         assert content[0]["content"] == ""
+
+
+class TestVerbosityMapping:
+    """verbosity 跨协议映射测试 (Chat 顶层 ↔ Responses text.verbosity)"""
+
+    def test_responses_text_verbosity_to_chat(self):
+        """测试 Responses text.verbosity 映射为 Chat 顶层 verbosity"""
+        request = {
+            "model": "gpt-4o",
+            "input": "Be brief",
+            "text": {
+                "format": {"type": "text"},
+                "verbosity": "low"
+            }
+        }
+        result = OpenAIResponsesConverter.to_openai_chat(request)
+        assert result["verbosity"] == "low"
+
+    def test_chat_verbosity_to_responses_text(self):
+        """测试 Chat 顶层 verbosity 映射为 Responses text.verbosity"""
+        request = {
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Be brief"}],
+            "verbosity": "high"
+        }
+        result = OpenAIResponsesConverter.from_openai_chat_request(request)
+        assert "text" in result
+        assert result["text"]["verbosity"] == "high"
+
+    def test_chat_verbosity_to_responses_preserves_existing_text(self):
+        """测试 Chat verbosity 映射时保留已有 text.format 配置"""
+        request = {
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Generate JSON"}],
+            "verbosity": "medium",
+            "response_format": {"type": "json_object"}
+        }
+        result = OpenAIResponsesConverter.from_openai_chat_request(request)
+        assert "text" in result
+        assert result["text"]["verbosity"] == "medium"
+        assert result["text"]["format"]["type"] == "json_object"
+
+    def test_responses_verbosity_to_anthropic_extra_body(self):
+        """测试 Responses text.verbosity 保留在 Anthropic extra_body"""
+        request = {
+            "model": "gpt-4o",
+            "input": "Be brief",
+            "text": {
+                "verbosity": "low"
+            }
+        }
+        result = OpenAIResponsesConverter.to_anthropic_request(request)
+        assert "extra_body" in result
+        assert result["extra_body"]["verbosity"] == "low"
+
+
+class TestReasoningGenerateSummary:
+    """reasoning.generate_summary 字段跨协议保留测试"""
+
+    def test_responses_generate_summary_to_chat(self):
+        """测试 Responses reasoning.generate_summary 保留到 Chat extra_body"""
+        request = {
+            "model": "o3",
+            "input": "Think about this",
+            "reasoning": {
+                "effort": "high",
+                "generate_summary": "auto",
+                "summary": "concise"
+            }
+        }
+        result = OpenAIResponsesConverter.to_openai_chat(request)
+        assert result["reasoning_effort"] == "high"
+        assert "extra_body" in result
+        assert result["extra_body"]["reasoning"]["generate_summary"] == "auto"
+        assert result["extra_body"]["reasoning"]["summary"] == "concise"
+
+    def test_chat_generate_summary_to_responses(self):
+        """测试 Chat extra_body.reasoning.generate_summary 恢复到 Responses reasoning"""
+        request = {
+            "model": "o3",
+            "messages": [{"role": "user", "content": "Think"}],
+            "reasoning_effort": "high",
+            "extra_body": {
+                "reasoning": {
+                    "effort": "high",
+                    "generate_summary": "auto",
+                    "summary": "concise"
+                }
+            }
+        }
+        result = OpenAIResponsesConverter.from_openai_chat_request(request)
+        assert "reasoning" in result
+        assert result["reasoning"]["effort"] == "high"
+        assert result["reasoning"]["generate_summary"] == "auto"
+        assert result["reasoning"]["summary"] == "concise"
+
+    def test_responses_generate_summary_to_anthropic_extra_body(self):
+        """测试 Responses reasoning.generate_summary 保留在 Anthropic extra_body"""
+        request = {
+            "model": "claude-sonnet-4-20250514",
+            "input": "Think about this",
+            "reasoning": {
+                "effort": "high",
+                "generate_summary": "auto"
+            }
+        }
+        result = OpenAIResponsesConverter.to_anthropic_request(request)
+        assert "extra_body" in result
+        assert result["extra_body"]["reasoning"]["generate_summary"] == "auto"
+
+
+class TestSystemCacheControl:
+    """Chat→Anthropic system cache_control 保留测试"""
+
+    def test_system_message_with_cache_control(self):
+        """测试含 cache_control 的 system 消息保留为 Anthropic TextBlockParam 格式"""
+        config = ConverterConfig(backend_type="anthropic")
+        engine = ProtocolConverterEngine(config)
+        
+        request = {
+            "model": "gpt-4o",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": [
+                        {"type": "text", "text": "You are helpful.", "cache_control": {"type": "ephemeral"}}
+                    ]
+                },
+                {"role": "user", "content": "Hello"}
+            ]
+        }
+        
+        result = engine.convert_request(request)
+        assert "system" in result
+        system = result["system"]
+        assert isinstance(system, list)
+        assert any(isinstance(b, dict) and b.get("cache_control") for b in system)
+
+    def test_anthropic_system_cache_control_to_chat(self):
+        """测试 Anthropic system cache_control 保留在 Chat 消息内容块中"""
+        request = {
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1024,
+            "system": [
+                {"type": "text", "text": "You are helpful.", "cache_control": {"type": "ephemeral"}}
+            ],
+            "messages": [{"role": "user", "content": "Hello"}]
+        }
+        result = AnthropicConverter.to_openai_chat(request)
+        system_msgs = [m for m in result["messages"] if m["role"] == "system"]
+        assert len(system_msgs) == 1
+        content = system_msgs[0]["content"]
+        assert isinstance(content, list)
+        assert any(b.get("cache_control") for b in content if isinstance(b, dict))
+
+
+class TestConvertContentToAnthropicEmpty:
+    """_convert_content_to_anthropic 空内容返回类型测试"""
+
+    def test_empty_content_returns_list(self):
+        """空内容返回内容块列表而非空字符串"""
+        result = OpenAIResponsesConverter._convert_content_to_anthropic([])
+        assert isinstance(result, list)
+        assert len(result) == 1
+        assert result[0]["type"] == "text"
+        assert result[0]["text"] == ""
+
+    def test_non_empty_content_returns_list(self):
+        """非空内容返回内容块列表"""
+        result = OpenAIResponsesConverter._convert_content_to_anthropic([
+            {"type": "text", "text": "Hello"}
+        ])
+        assert isinstance(result, list)
+        assert result[0]["text"] == "Hello"

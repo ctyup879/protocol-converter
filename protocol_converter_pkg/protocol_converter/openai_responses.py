@@ -260,16 +260,22 @@ class OpenAIResponsesConverter:
             effort = reasoning.get("effort")
             if effort:
                 chat_request["reasoning_effort"] = effort
-            # 保留 reasoning 的 summary 配置
-            summary = reasoning.get("summary")
-            if summary is not None:
+            # 保留 reasoning 的 summary 和 generate_summary 配置
+            # SDK v2.11: reasoning 参数支持 effort + summary + generate_summary
+            if reasoning.get("summary") is not None or reasoning.get("generate_summary") is not None:
                 if "extra_body" not in chat_request:
                     chat_request["extra_body"] = {}
                 chat_request["extra_body"]["reasoning"] = reasoning
         
-        # 9. 处理 text 参数 (structured outputs) -> response_format
+        # 9. 处理 text 参数 (structured outputs + verbosity) -> response_format
         text_config = request.get("text")
         if text_config and isinstance(text_config, dict):
+            # 9.1 text.verbosity -> Chat 顶层 verbosity
+            # SDK: ResponseTextConfigParam.verbosity -> ChatCompletionRequest.verbosity
+            verbosity = text_config.get("verbosity")
+            if verbosity:
+                chat_request["verbosity"] = verbosity
+            # 9.2 text.format -> response_format
             format_config = text_config.get("format")
             if format_config and isinstance(format_config, dict):
                 fmt_type = format_config.get("type")
@@ -981,14 +987,17 @@ class OpenAIResponsesConverter:
         if request.get("metadata"):
             responses_request["metadata"] = request["metadata"]
         
-        # reasoning_effort -> reasoning (含 effort + summary)
+        # reasoning_effort -> reasoning (含 effort + summary + generate_summary)
         if request.get("reasoning_effort"):
             reasoning_config = {"effort": request["reasoning_effort"]}
-            # 如果 extra_body 中有原始 reasoning 配置（含 summary），合并
+            # 如果 extra_body 中有原始 reasoning 配置（含 summary/generate_summary），合并
             if isinstance(request.get("extra_body"), dict):
                 original_reasoning = request["extra_body"].get("reasoning")
-                if isinstance(original_reasoning, dict) and original_reasoning.get("summary") is not None:
-                    reasoning_config["summary"] = original_reasoning["summary"]
+                if isinstance(original_reasoning, dict):
+                    if original_reasoning.get("summary") is not None:
+                        reasoning_config["summary"] = original_reasoning["summary"]
+                    if original_reasoning.get("generate_summary") is not None:
+                        reasoning_config["generate_summary"] = original_reasoning["generate_summary"]
             responses_request["reasoning"] = reasoning_config
         
         # response_format -> text
@@ -1033,10 +1042,15 @@ class OpenAIResponsesConverter:
         if request.get("prompt_cache_retention"):
             responses_request["prompt_cache_retention"] = request["prompt_cache_retention"]
         
-        # verbosity (Chat API 新增参数)
+        # verbosity -> text.verbosity
+        # SDK: Chat 顶层 verbosity -> Responses text.verbosity (ResponseTextConfigParam)
         if request.get("verbosity"):
-            responses_request["extra_body"] = responses_request.get("extra_body", {})
-            responses_request["extra_body"]["verbosity"] = request["verbosity"]
+            if "text" not in responses_request:
+                responses_request["text"] = {}
+            if "format" not in responses_request["text"]:
+                # 保留已有的 format 配置，仅添加 verbosity
+                pass
+            responses_request["text"]["verbosity"] = request["verbosity"]
         
         # top_logprobs
         if request.get("top_logprobs") is not None:
@@ -1252,6 +1266,12 @@ class OpenAIResponsesConverter:
                     anthropic_request["extra_body"] = {}
                 anthropic_request["extra_body"]["metadata"] = non_user_fields
         
+        # 8.5 text.verbosity 保留（Anthropic 无直接等价参数，放入 extra_body）
+        if isinstance(request.get("text"), dict) and request["text"].get("verbosity"):
+            if "extra_body" not in anthropic_request:
+                anthropic_request["extra_body"] = {}
+            anthropic_request["extra_body"]["verbosity"] = request["text"]["verbosity"]
+        
         # 9. service_tier 映射
         if request.get("service_tier"):
             tier_map = {"default": "standard_only", "auto": "auto"}
@@ -1289,6 +1309,9 @@ class OpenAIResponsesConverter:
             extra["user"] = request["user"]
         if request.get("top_logprobs") is not None:
             extra["top_logprobs"] = request["top_logprobs"]
+        # reasoning.generate_summary 保留（请求参数，非 Anthropic 原生支持）
+        if isinstance(request.get("reasoning"), dict) and request["reasoning"].get("generate_summary") is not None:
+            extra["reasoning"] = request["reasoning"]
         if request.get("frequency_penalty") is not None:
             extra["frequency_penalty"] = request["frequency_penalty"]
         if request.get("presence_penalty") is not None:
@@ -1377,9 +1400,8 @@ class OpenAIResponsesConverter:
             # assistant 的工具调用
             args_str = item.get("arguments", "{}")
             try:
-                import json as _json
-                args_obj = _json.loads(args_str) if isinstance(args_str, str) else args_str
-            except (_json.JSONDecodeError, TypeError):
+                args_obj = json.loads(args_str) if isinstance(args_str, str) else args_str
+            except (json.JSONDecodeError, TypeError):
                 args_obj = {}
             return {
                 "role": "assistant",
@@ -1488,7 +1510,7 @@ class OpenAIResponsesConverter:
                 if text:
                     content_blocks.append({"type": "text", "text": str(text)})
         
-        return content_blocks if content_blocks else ""
+        return content_blocks if content_blocks else [{"type": "text", "text": ""}]
     
     @classmethod
     def _convert_tools_to_anthropic(cls, tools: List[Dict]) -> List[Dict]:

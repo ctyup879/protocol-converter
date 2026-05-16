@@ -317,7 +317,7 @@ class AnthropicConverter:
     
     @classmethod
     def _convert_system_blocks(cls, blocks: List[Dict]) -> Union[str, List[Dict], None]:
-        """转换 Anthropic system 内容块列表"""
+        """转换 Anthropic system 内容块列表，保留 cache_control"""
         has_complex = False
         text_parts = []
         content_parts = []
@@ -329,7 +329,12 @@ class AnthropicConverter:
             
             if block_type == "text":
                 text_parts.append(block.get("text", ""))
-                content_parts.append({"type": "text", "text": block.get("text", "")})
+                # 保留 cache_control（Chat API 无直接等价，但保留在内容块中用于往返转换）
+                text_block = {"type": "text", "text": block.get("text", "")}
+                if block.get("cache_control"):
+                    has_complex = True
+                    text_block["cache_control"] = block["cache_control"]
+                content_parts.append(text_block)
             else:
                 has_complex = True
         
