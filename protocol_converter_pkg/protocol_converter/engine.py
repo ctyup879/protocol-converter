@@ -70,7 +70,7 @@ class ConverterConfig:
     # OpenAI 特有配置
     # 提示缓存键 (替代 user 字段)
     prompt_cache_key: Optional[str] = None
-    # 提示缓存保留策略 ("in_memory" | "24h")
+    # 提示缓存保留策略 ("in-memory" | "24h")
     prompt_cache_retention: Optional[str] = None
     
     def get_model(self, model: str) -> str:

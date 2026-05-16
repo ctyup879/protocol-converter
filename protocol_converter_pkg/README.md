@@ -197,7 +197,7 @@ config = ConverterConfig(
 | `anthropic_version` | str | `"2023-06-01"` | Anthropic API 版本 |
 | `inference_geo` | str | `None` | Anthropic 推理地理区域 |
 | `prompt_cache_key` | str | `None` | OpenAI 提示缓存键（替代 `user`） |
-| `prompt_cache_retention` | str | `None` | 缓存保留策略（`"in_memory"` / `"24h"`） |
+| `prompt_cache_retention` | str | `None` | 缓存保留策略（`"in-memory"` / `"24h"`） |
 
 ## 参数映射详情
 
@@ -448,7 +448,7 @@ protocol_converter_pkg/
 │   ├── openai_responses.py     # OpenAI Responses 转换器
 │   └── engine.py                # 核心转换引擎
 ├── tests/
-│   └── test_protocol_converter.py   # 312 个单元测试
+│   └── test_protocol_converter.py   # 321 个单元测试
 ├── examples/
 │   ├── integration_test_chat_backend.py       # OpenAI Chat 后端集成测试
 │   ├── integration_test_anthropic_backend.py  # Anthropic 后端集成测试
@@ -479,12 +479,17 @@ pip install pytest pytest-asyncio httpx
 | pytest-asyncio | ≥ 0.21.0 | 异步测试支持 | 开发必需 |
 | pytest-cov | ≥ 4.0.0 | 测试覆盖率 | 开发可选 |
 
-> **审查参考**：协议转换逻辑的审查基于以下官方资料：OpenAI Chat Completions API 文档、OpenAI Responses API 文档、Anthropic Messages API 文档、`openai-python` SDK v2.11 源码、`anthropic-sdk-python` 源码，以及 Context7 实时文档检索。
+**协议参考与验证来源**：
+
+- OpenAI Chat Completions API — `openai-python` SDK v2.11 源码（`ChatCompletionReasoningEffort`、`ChatCompletionStreamOptions`、`prompt_cache_retention` 等）
+- OpenAI Responses API — 官方文档 `developers.openai.com`（`reasoning.summary`、`text.format`、流式事件序列）
+- Anthropic Messages API — `anthropic-sdk-python` 源码（`ThinkingConfigParam`、`RedactedThinkingBlock.data`、`OutputConfigParam`、`Container` 等）
+- Context7 实时文档检索验证（三方 API 参数规范与类型定义交叉比对）
 
 ### 执行单元测试
 
 ```bash
-# 运行全部 312 个单元测试
+# 运行全部 321 个单元测试
 python3 -m pytest tests/ -v
 
 # 运行带覆盖率的测试
@@ -500,6 +505,7 @@ python3 -m pytest tests/ -v -k "TestAnthropicThinkingWithText"
 
 ```bash
 # 1. OpenAI Chat 后端集成测试（MiniMax API，8 项测试）
+cd /root/repos/ai-proxy/protocol_converter_pkg
 python3 examples/integration_test_chat_backend.py
 
 # 2. Anthropic 兼容后端集成测试（MiniMax API，7 项测试）
@@ -524,15 +530,18 @@ python3 examples/integration_test_all_9_paths.py
 
 ## 更新日志
 
-### v1.16.0 (Unreleased)
+### v1.16.0
 
-本次审查修复以下缺陷：
+本次审查修复以下缺陷（基于官方文档、Context7 实时检索和 Python SDK `openai-python` v2.11、`anthropic-sdk-python` 源码）：
 
-- **Chat→Anthropic `metadata` 字段完全传递修复**：`engine.py` 中 `_chat_to_anthropic_request` 之前只提取 `metadata.user_id`，其他 metadata 字段丢失。现改为 `anthropic_request["metadata"].update(req_metadata)`，完整保留 metadata 所有字段（包含 `session_id` 等自定义字段），同时 `user` 字段仍正确覆盖 `user_id`（优先级最高）
-- **`_convert_content_to_chat` 多模态空内容边界修复**：`openai_responses.py` 中当 `has_multimodal=True` 但 `content_parts` 和 `text_parts` 均为空时，之前返回 `[]`（空列表），可能导致调用方处理异常。现修正为返回 `""`（空字符串），与其他空内容场景保持一致
-- **JSON 解析异常处理细化**：`openai_responses.py` 第 1310 行 `except Exception` 改为 `except (_json.JSONDecodeError, TypeError)`，避免捕获无关异常
-
-**312 个单元测试全部通过，9 路集成测试全部通过，4 个后端集成测试全部通过**
+- **Chat→Responses assistant 消息 `content=None` + `reasoning_content` 转换修复**：`from_openai_chat_request` 在 assistant 消息有 `reasoning_content` 但 `content=None`（且无 `tool_calls`）时，之前将 None 转为字符串 `"None"` 创建 `input_text` 消息。现正确处理：`content=None` 时创建 reasoning 输入项而非包含 "None" 文本的消息
+- **Chat→Responses assistant 消息 `content=None` 无 reasoning 无 tool_calls 修复**：assistant 消息 `content=None` 且无推理内容和工具调用时，现创建空 `content` 的 message 输入项保持消息序列完整性，而非生成 "None" 文本
+- **`_convert_content_to_chat` 多模态空内容返回类型一致性修复**：`openai_responses.py` 中当 `has_multimodal=True` 但 `content_parts` 和 `text_parts` 均为空时，之前返回 `""`（空字符串），破坏了 `has_multimodal=True` 时返回列表类型的约定。现修正为返回 `[]`（空列表），保持类型一致性
+- **Responses→Anthropic `container` 字段保留**：`OpenAIResponsesConverter.to_anthropic` 响应转换现正确保留 Responses 响应中的 `container` 字段（Anthropic API 支持 container 语义）
+- **Responses→Anthropic `function_call_output` 非字符串 output 转换修复**：`_convert_input_item_to_anthropic` 在 Responses `function_call_output` 的 `output` 为列表（多内容块工具结果）时，现正确转换为 Anthropic `tool_result.content` 的内容块列表（之前直接传递原始值，可能导致类型不匹配）
+- **`ConverterConfig` 文档注释修正**：`prompt_cache_retention` 值从 `"in_memory"` 修正为 `"in-memory"`，与 OpenAI Python SDK `Literal["in-memory", "24h"]` 规范一致
+- **321 个单元测试**（新增 9 个覆盖上述修复）
+- **9 路集成测试全部通过**
 
 ### v1.15.0
 

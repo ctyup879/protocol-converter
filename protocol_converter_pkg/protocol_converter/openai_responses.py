@@ -583,7 +583,7 @@ class OpenAIResponsesConverter:
             elif text_parts:
                 return [{"type": "text", "text": "\n".join(text_parts)}]
             else:
-                return ""
+                return []
         elif text_parts:
             return "\n".join(text_parts)
         return ""
@@ -862,11 +862,20 @@ class OpenAIResponsesConverter:
                             "id": f"rs_{uuid.uuid4().hex[:24]}",
                             "summary": [{"type": "summary_text", "text": msg["reasoning_content"]}]
                         })
-                    input_items.append({
-                        "type": "message",
-                        "role": role,
-                        "content": [{"type": "input_text", "text": content}]
-                    })
+                    if content:
+                        input_items.append({
+                            "type": "message",
+                            "role": role,
+                            "content": [{"type": "input_text", "text": content}]
+                        })
+                    elif role != "assistant":
+                        # 非 assistant 角色的空字符串也创建消息
+                        input_items.append({
+                            "type": "message",
+                            "role": role,
+                            "content": [{"type": "input_text", "text": content}]
+                        })
+                    # assistant 角色且 content 为空字符串时跳过（reasoning 已单独处理）
                 elif isinstance(content, list):
                     # 多模态内容
                     # 处理 assistant 消息的 reasoning_content（列表内容场景）
@@ -877,12 +886,37 @@ class OpenAIResponsesConverter:
                             "summary": [{"type": "summary_text", "text": msg["reasoning_content"]}]
                         })
                     content_items = cls._convert_chat_content_to_responses(content)
-                    input_items.append({
-                        "type": "message",
-                        "role": role,
-                        "content": content_items
-                    })
+                    if content_items:
+                        input_items.append({
+                            "type": "message",
+                            "role": role,
+                            "content": content_items
+                        })
+                elif content is None:
+                    # content 为 None（常见于 assistant + tool_calls 场景，但此处无 tool_calls）
+                    if role == "assistant" and msg.get("reasoning_content"):
+                        # 有推理内容 → 创建 reasoning 输入项
+                        input_items.append({
+                            "type": "reasoning",
+                            "id": f"rs_{uuid.uuid4().hex[:24]}",
+                            "summary": [{"type": "summary_text", "text": msg["reasoning_content"]}]
+                        })
+                    elif role == "assistant":
+                        # assistant 无内容也无推理，创建空消息保持消息序列
+                        input_items.append({
+                            "type": "message",
+                            "role": role,
+                            "content": []
+                        })
+                    else:
+                        # 非assistant角色的 None content 降级为空字符串
+                        input_items.append({
+                            "type": "message",
+                            "role": role,
+                            "content": [{"type": "input_text", "text": ""}]
+                        })
                 else:
+                    # 其他类型（数字等）转为字符串
                     input_items.append({
                         "type": "message",
                         "role": role,
@@ -1292,12 +1326,50 @@ class OpenAIResponsesConverter:
         
         elif item_type == "function_call_output":
             # 工具结果 → tool_result 块
+            # Anthropic tool_result.content 可以是字符串或内容块列表
+            output_val = item.get("output", "")
+            if isinstance(output_val, str):
+                tool_content = output_val
+            elif isinstance(output_val, list):
+                # 列表类型输出 → 转换为 Anthropic 内容块列表
+                content_blocks = []
+                for part in output_val:
+                    if isinstance(part, dict):
+                        part_type = part.get("type", "")
+                        if part_type in ("text", "input_text", "output_text"):
+                            content_blocks.append({"type": "text", "text": part.get("text", "")})
+                        elif part_type == "input_image":
+                            # 图片输出 → Anthropic image 块
+                            image_url = part.get("image_url", "")
+                            if image_url:
+                                if image_url.startswith("data:"):
+                                    parts = image_url.split(";", 1)
+                                    media_type = parts[0].replace("data:", "") if len(parts) > 1 else "image/png"
+                                    data = parts[1].replace("base64,", "") if len(parts) > 1 else ""
+                                    content_blocks.append({
+                                        "type": "image",
+                                        "source": {"type": "base64", "media_type": media_type, "data": data}
+                                    })
+                                else:
+                                    content_blocks.append({
+                                        "type": "image",
+                                        "source": {"type": "url", "url": image_url}
+                                    })
+                        else:
+                            text = part.get("text", "")
+                            if text:
+                                content_blocks.append({"type": "text", "text": text})
+                    else:
+                        content_blocks.append({"type": "text", "text": str(part)})
+                tool_content = content_blocks if content_blocks else ""
+            else:
+                tool_content = str(output_val) if output_val is not None else ""
             return {
                 "role": "user",
                 "content": [{
                     "type": "tool_result",
                     "tool_use_id": item.get("call_id", ""),
-                    "content": item.get("output", "")
+                    "content": tool_content
                 }]
             }
         
@@ -2135,6 +2207,10 @@ class OpenAIResponsesConverter:
             "stop_details": stop_details,
             "usage": anthropic_usage
         }
+        
+        # 保留 container 字段（Anthropic 响应可能包含此字段）
+        if response.get("container"):
+            result["container"] = response["container"]
         
         return result
     

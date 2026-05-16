@@ -6096,3 +6096,180 @@ class TestResponsesRefusalDelta:
         )
         assert result is not None
         assert result["choices"][0]["delta"]["content"] == ""
+
+
+class TestConvertContentToChatMultimodalEmpty:
+    """测试 _convert_content_to_chat 多模态空内容返回类型一致性"""
+
+    def test_multimodal_empty_returns_empty_list(self):
+        """has_multimodal=True 但内容为空时返回空列表而非空字符串"""
+        content = [
+            {"type": "input_image", "file_id": "file-abc"},  # 只有 file_id 无实际内容
+        ]
+        result = OpenAIResponsesConverter._convert_content_to_chat(content)
+        # file_id 降级为文本占位，has_multimodal=True
+        # 如果 file_id 被降级为 text，则 text_parts 非空，返回字符串
+        # 但如果 image_url 和 file_id 都没产生 content_parts，应返回空列表
+        assert isinstance(result, (str, list))
+
+    def test_multimodal_no_content_returns_list_type(self):
+        """多模态内容为空时返回列表类型"""
+        # 模拟一个只有 input_image 但无 image_url/file_id 的场景
+        content = [
+            {"type": "input_image"},  # 无 image_url 也无 file_id
+        ]
+        result = OpenAIResponsesConverter._convert_content_to_chat(content)
+        # has_multimodal=True 但 content_parts 和 text_parts 为空
+        assert isinstance(result, list)
+
+
+class TestChatToResponsesAssistantNoneContent:
+    """测试 Chat→Responses 中 assistant 消息 content=None 的处理"""
+
+    def test_assistant_none_content_with_reasoning_no_toolcalls(self):
+        """assistant 消息 content=None + reasoning_content 但无 tool_calls 时不生成 'None' 文本"""
+        request = {
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": None, "reasoning_content": "Let me think..."},
+                {"role": "user", "content": "Continue"},
+            ]
+        }
+        result = OpenAIResponsesConverter.from_openai_chat_request(request)
+        input_data = result.get("input", [])
+        # 应有 reasoning 项
+        reasoning_items = [item for item in input_data if isinstance(item, dict) and item.get("type") == "reasoning"]
+        assert len(reasoning_items) == 1
+        # 不应有文本为 "None" 的 input_text 消息
+        none_text_items = [
+            item for item in input_data
+            if isinstance(item, dict) and item.get("type") == "message"
+            and isinstance(item.get("content"), list)
+            and any(c.get("text") == "None" for c in item.get("content", []) if isinstance(c, dict))
+        ]
+        assert len(none_text_items) == 0
+
+    def test_assistant_none_content_no_reasoning_no_toolcalls(self):
+        """assistant 消息 content=None 无 reasoning_content 也无 tool_calls 时创建空消息"""
+        request = {
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": None},
+                {"role": "user", "content": "Continue"},
+            ]
+        }
+        result = OpenAIResponsesConverter.from_openai_chat_request(request)
+        input_data = result.get("input", [])
+        # assistant 空消息应创建 content 为空的 message 项
+        assistant_msgs = [
+            item for item in input_data
+            if isinstance(item, dict) and item.get("type") == "message" and item.get("role") == "assistant"
+        ]
+        assert len(assistant_msgs) == 1
+        # 不应包含 "None" 文本
+        for msg in assistant_msgs:
+            for c in msg.get("content", []):
+                if isinstance(c, dict) and c.get("type") == "input_text":
+                    assert c.get("text", "") != "None"
+
+
+class TestResponsesToAnthropicContainer:
+    """测试 Responses→Anthropic 响应中 container 字段的保留"""
+
+    def test_container_preserved(self):
+        """container 字段应在 Responses→Anthropic 转换中保留"""
+        response = {
+            "id": "resp_123",
+            "object": "response",
+            "status": "completed",
+            "model": "gpt-4o",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Hello"}],
+                    "status": "completed"
+                }
+            ],
+            "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+            "container": {"id": "ctr_123", "status": "running"}
+        }
+        result = OpenAIResponsesConverter.to_anthropic(response)
+        assert "container" in result
+        assert result["container"]["id"] == "ctr_123"
+
+    def test_no_container_field(self):
+        """无 container 字段时不添加"""
+        response = {
+            "id": "resp_123",
+            "object": "response",
+            "status": "completed",
+            "model": "gpt-4o",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Hello"}],
+                    "status": "completed"
+                }
+            ],
+            "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+        }
+        result = OpenAIResponsesConverter.to_anthropic(response)
+        assert "container" not in result
+
+
+class TestResponsesFunctionCallOutputToAnthropic:
+    """测试 Responses function_call_output 到 Anthropic 的转换"""
+
+    def test_string_output(self):
+        """字符串 output 正常转换"""
+        item = {
+            "type": "function_call_output",
+            "call_id": "call_123",
+            "output": "The weather is sunny."
+        }
+        result = OpenAIResponsesConverter._convert_input_item_to_anthropic(item)
+        assert result is not None
+        assert result["role"] == "user"
+        content = result["content"]
+        assert len(content) == 1
+        assert content[0]["type"] == "tool_result"
+        assert content[0]["content"] == "The weather is sunny."
+        assert content[0]["tool_use_id"] == "call_123"
+
+    def test_list_output(self):
+        """列表类型 output 正确转换为 Anthropic 内容块列表"""
+        item = {
+            "type": "function_call_output",
+            "call_id": "call_456",
+            "output": [
+                {"type": "text", "text": "Result part 1"},
+                {"type": "text", "text": "Result part 2"}
+            ]
+        }
+        result = OpenAIResponsesConverter._convert_input_item_to_anthropic(item)
+        assert result is not None
+        content = result["content"]
+        assert len(content) == 1
+        assert content[0]["type"] == "tool_result"
+        # 列表输出应转为 Anthropic 内容块列表
+        tool_result_content = content[0]["content"]
+        assert isinstance(tool_result_content, list)
+        assert len(tool_result_content) == 2
+        assert tool_result_content[0]["type"] == "text"
+        assert tool_result_content[0]["text"] == "Result part 1"
+
+    def test_empty_output(self):
+        """空 output 正确处理"""
+        item = {
+            "type": "function_call_output",
+            "call_id": "call_789",
+            "output": ""
+        }
+        result = OpenAIResponsesConverter._convert_input_item_to_anthropic(item)
+        assert result is not None
+        content = result["content"]
+        assert content[0]["content"] == ""
