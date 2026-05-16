@@ -578,7 +578,12 @@ class OpenAIResponsesConverter:
                     content_parts.append({"type": "text", "text": str(text)})
         
         if has_multimodal:
-            return content_parts if content_parts else [{"type": "text", "text": "\n".join(text_parts)}] if text_parts else []
+            if content_parts:
+                return content_parts
+            elif text_parts:
+                return [{"type": "text", "text": "\n".join(text_parts)}]
+            else:
+                return ""
         elif text_parts:
             return "\n".join(text_parts)
         return ""
@@ -1302,7 +1307,7 @@ class OpenAIResponsesConverter:
             try:
                 import json as _json
                 args_obj = _json.loads(args_str) if isinstance(args_str, str) else args_str
-            except Exception:
+            except (_json.JSONDecodeError, TypeError):
                 args_obj = {}
             return {
                 "role": "assistant",

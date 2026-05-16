@@ -299,7 +299,12 @@ class ProtocolConverterEngine:
                                     content_blocks.append({"type": "text", "text": text})
                         else:
                             content_blocks.append({"type": "text", "text": str(b)})
-                    tool_content = content_blocks if content_blocks else str(content)
+                    if content_blocks:
+                        tool_content = content_blocks
+                    elif isinstance(content, list) and not content:
+                        tool_content = ""
+                    else:
+                        tool_content = str(content)
                     # 检测列表中第一项文本是否为 [Error] 标记
                     if (isinstance(tool_content, list) and len(tool_content) > 0
                             and isinstance(tool_content[0], dict)
@@ -463,19 +468,19 @@ class ProtocolConverterEngine:
             else:
                 anthropic_request["stop_sequences"] = [stop_val]
         
-        # user 字段 -> Anthropic metadata.user_id
-        user_id = request.get("user")
-        if user_id:
-            if "metadata" not in anthropic_request:
-                anthropic_request["metadata"] = {}
-            anthropic_request["metadata"]["user_id"] = user_id
-        
         # metadata 合并（请求中的 metadata 可能已有其他字段）
         req_metadata = request.get("metadata")
         if req_metadata and isinstance(req_metadata, dict):
             if "metadata" not in anthropic_request:
                 anthropic_request["metadata"] = {}
             anthropic_request["metadata"].update(req_metadata)
+
+        # user 字段 -> Anthropic metadata.user_id（优先级高于 req_metadata）
+        user_id = request.get("user")
+        if user_id:
+            if "metadata" not in anthropic_request:
+                anthropic_request["metadata"] = {}
+            anthropic_request["metadata"]["user_id"] = user_id
         
         # 转换 tools
         chat_tools = request.get("tools", [])
@@ -613,7 +618,7 @@ class ProtocolConverterEngine:
         if response_format and isinstance(response_format, dict):
             fmt_type = response_format.get("type", "")
             if fmt_type == "json_schema":
-                json_schema = response_format.get("json_schema", {})
+                json_schema = response_format.get("json_schema") or {}
                 output_format = {"type": "json_schema"}
                 if json_schema.get("name"):
                     output_format["name"] = json_schema["name"]
@@ -715,9 +720,11 @@ class ProtocolConverterEngine:
         for block in content:
             if block.get("type") == "text":
                 message_content = block.get("text", "")
-                # 保留 citations -> Chat annotations
+                # 保留 citations -> Chat annotations（多个 text 块的 citations 合并）
                 if block.get("citations"):
-                    message_annotations = block["citations"]
+                    if message_annotations is None:
+                        message_annotations = []
+                    message_annotations.extend(block["citations"])
             elif block.get("type") == "thinking":
                 # thinking 块 -> reasoning_content (OpenAI o系列格式)
                 thinking_text = block.get("thinking", "")

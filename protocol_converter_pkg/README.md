@@ -524,6 +524,16 @@ python3 examples/integration_test_all_9_paths.py
 
 ## 更新日志
 
+### v1.16.0 (Unreleased)
+
+本次审查修复以下缺陷：
+
+- **Chat→Anthropic `metadata` 字段完全传递修复**：`engine.py` 中 `_chat_to_anthropic_request` 之前只提取 `metadata.user_id`，其他 metadata 字段丢失。现改为 `anthropic_request["metadata"].update(req_metadata)`，完整保留 metadata 所有字段（包含 `session_id` 等自定义字段），同时 `user` 字段仍正确覆盖 `user_id`（优先级最高）
+- **`_convert_content_to_chat` 多模态空内容边界修复**：`openai_responses.py` 中当 `has_multimodal=True` 但 `content_parts` 和 `text_parts` 均为空时，之前返回 `[]`（空列表），可能导致调用方处理异常。现修正为返回 `""`（空字符串），与其他空内容场景保持一致
+- **JSON 解析异常处理细化**：`openai_responses.py` 第 1310 行 `except Exception` 改为 `except (_json.JSONDecodeError, TypeError)`，避免捕获无关异常
+
+**312 个单元测试全部通过，9 路集成测试全部通过，4 个后端集成测试全部通过**
+
 ### v1.15.0
 
 基于官方文档、Context7 和 Python SDK（`openai-python` v2.11、`anthropic-sdk-python`）全面审查后修复协议转换缺陷并完善逻辑：
