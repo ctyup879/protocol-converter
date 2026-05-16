@@ -95,7 +95,7 @@ def example_convert_to_openai_chat():
     }
     
     converted = OpenAIChatConverter.to_openai_chat(anthropic_request)
-    print(json.dumps(converted, indent=2, ensure_ascii=False))
+    print(json.dumps(converted.to_dict(), indent=2, ensure_ascii=False))
     print()
 
 

@@ -196,9 +196,8 @@ class ProtocolConverterEngine:
             if source_protocol == Protocol.OPENAI_CHAT:
                 result = self._chat_to_anthropic_request(request)
             elif source_protocol == Protocol.OPENAI_RESPONSES:
-                # 先转为 Chat，再转为 Anthropic
-                chat_req = self.openai_responses.to_openai_chat(request)
-                result = self._chat_to_anthropic_request(chat_req)
+                # 直接转换，避免经 Chat 中转丢失数据（reasoning/text 等特有参数）
+                result = self.openai_responses.to_anthropic_request(request)
             else:
                 result = copy.deepcopy(request) if isinstance(request, dict) else request
         

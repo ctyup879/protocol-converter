@@ -150,7 +150,13 @@ class AnthropicConverter:
             
         Returns:
             Dict: OpenAI Chat 格式请求
+            
+        Raises:
+            TypeError: 如果 request 不是字典
         """
+        if not isinstance(request, dict):
+            raise TypeError(f"request must be a dict, got {type(request).__name__}")
+        
         messages = []
         
         # 1. 处理 system prompt（Anthropic 顶级参数 -> OpenAI system 消息）
@@ -649,7 +655,13 @@ class AnthropicConverter:
         OpenAI: {"id", "model", "choices": [{"message": {"content", "tool_calls", "reasoning_content"}, "finish_reason"}], "usage"}
         Anthropic: {"id", "type", "role", "content": [{"type": "text"}|{"type": "thinking"}|{"type": "tool_use"}], 
                     "model", "stop_reason", "stop_sequence", "stop_details", "usage"}
+        
+        Raises:
+            TypeError: 如果 response 不是字典
         """
+        if not isinstance(response, dict):
+            raise TypeError(f"response must be a dict, got {type(response).__name__}")
+        
         choices = response.get("choices", [])
         content_blocks = []
         stop_reason = "end_turn"

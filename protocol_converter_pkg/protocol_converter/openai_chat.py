@@ -86,6 +86,15 @@ class ChatCompletionRequest:
     safety_identifier: Optional[str] = None
     prompt_cache_key: Optional[str] = None
     prompt_cache_retention: Optional[str] = None
+    extra_body: Optional[Dict[str, Any]] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """转换为字典，过滤 None 值"""
+        result: Dict[str, Any] = {}
+        for key, value in self.__dict__.items():
+            if value is not None:
+                result[key] = value
+        return result
 
 
 @dataclass
@@ -100,6 +109,14 @@ class ChatCompletionResponse:
     service_tier: Optional[str] = None
     system_fingerprint: Optional[str] = None
     metadata: Optional[Dict[str, str]] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """转换为字典，过滤 None 值"""
+        result: Dict[str, Any] = {}
+        for key, value in self.__dict__.items():
+            if value is not None:
+                result[key] = value
+        return result
 
 
 class OpenAIChatConverter:
@@ -132,7 +149,13 @@ class OpenAIChatConverter:
         通用请求转换为 OpenAI Chat 格式
         
         自动检测输入协议并转换
+        
+        Raises:
+            TypeError: 如果 request 不是字典
         """
+        if not isinstance(request, dict):
+            raise TypeError(f"request must be a dict, got {type(request).__name__}")
+        
         from .protocol_detector import ProtocolDetector, Protocol
 
         if ProtocolDetector.detect(request) == Protocol.ANTHROPIC:
@@ -183,20 +206,25 @@ class OpenAIChatConverter:
     def _from_anthropic(cls, request: Dict[str, Any]) -> ChatCompletionRequest:
         """从 Anthropic 格式转换"""
         from .anthropic import AnthropicConverter
-        
+
         chat_dict = AnthropicConverter.to_openai_chat(request)
-        
+
         return ChatCompletionRequest(
             model=chat_dict.get("model", "claude-sonnet-4-20250514"),
             messages=chat_dict.get("messages", []),
             stream=chat_dict.get("stream", False),
             temperature=chat_dict.get("temperature"),
             top_p=chat_dict.get("top_p"),
+            max_completion_tokens=chat_dict.get("max_completion_tokens"),
             max_tokens=chat_dict.get("max_tokens"),
             tools=chat_dict.get("tools"),
             tool_choice=chat_dict.get("tool_choice"),
+            reasoning_effort=chat_dict.get("reasoning_effort"),
+            parallel_tool_calls=chat_dict.get("parallel_tool_calls"),
             stop=chat_dict.get("stop"),
             user=chat_dict.get("user"),
+            service_tier=chat_dict.get("service_tier"),
+            extra_body=chat_dict.get("extra_body"),
         )
     
     # ================================================================

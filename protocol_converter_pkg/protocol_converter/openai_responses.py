@@ -131,7 +131,13 @@ class OpenAIResponsesConverter:
             
         Returns:
             Dict: OpenAI Chat 格式请求
+            
+        Raises:
+            TypeError: 如果 request 不是字典
         """
+        if not isinstance(request, dict):
+            raise TypeError(f"request must be a dict, got {type(request).__name__}")
+        
         messages = []
         
         # 1. 处理 input（可以是字符串或数组）
@@ -253,9 +259,31 @@ class OpenAIResponsesConverter:
             if format_config and isinstance(format_config, dict):
                 fmt_type = format_config.get("type")
                 if fmt_type == "json_schema":
+                    # Responses API: {"type": "json_schema", "name": "...", "schema": {...}, "strict": bool}
+                    # Chat API: {"type": "json_schema", "json_schema": {"name": "...", "schema": {...}, "strict": bool}}
+                    # 兼容两种格式：标准 Responses 格式（name/schema 在顶层）和旧版嵌套格式
+                    json_schema = {}
+                    if format_config.get("name") or format_config.get("schema"):
+                        # 标准 Responses 格式：name/schema 在顶层
+                        if format_config.get("name"):
+                            json_schema["name"] = format_config["name"]
+                        if format_config.get("schema"):
+                            json_schema["schema"] = format_config["schema"]
+                        if format_config.get("strict") is not None:
+                            json_schema["strict"] = format_config["strict"]
+                    elif format_config.get("json_schema"):
+                        # 旧版嵌套格式：name/schema 在 json_schema 子对象中
+                        nested = format_config["json_schema"]
+                        if isinstance(nested, dict):
+                            if nested.get("name"):
+                                json_schema["name"] = nested["name"]
+                            if nested.get("schema"):
+                                json_schema["schema"] = nested["schema"]
+                            if nested.get("strict") is not None:
+                                json_schema["strict"] = nested["strict"]
                     chat_request["response_format"] = {
                         "type": "json_schema",
-                        "json_schema": format_config.get("json_schema", format_config)
+                        "json_schema": json_schema
                     }
                 elif fmt_type == "json_object":
                     chat_request["response_format"] = {"type": "json_object"}
@@ -298,10 +326,21 @@ class OpenAIResponsesConverter:
             chat_request["prompt_cache_key"] = request["prompt_cache_key"]
         if request.get("prompt_cache_retention"):
             chat_request["prompt_cache_retention"] = request["prompt_cache_retention"]
+        # stream_options: Responses include_obfuscation 不等价于 Chat include_usage
+        # Responses stream_options.include_obfuscation → Chat 不支持，放入 extra_body
         if request.get("stream_options"):
-            chat_request["stream_options"] = request["stream_options"]
+            stream_opts = request["stream_options"]
+            if isinstance(stream_opts, dict) and stream_opts.get("include_obfuscation") is not None:
+                if "extra_body" not in chat_request:
+                    chat_request["extra_body"] = {}
+                chat_request["extra_body"]["stream_options"] = stream_opts
+            else:
+                # 其他 stream_options 字段（如 include_usage）直接传递
+                chat_request["stream_options"] = stream_opts
         if request.get("top_logprobs") is not None:
             chat_request["top_logprobs"] = request["top_logprobs"]
+            # Chat API 要求 logprobs=True 时才能使用 top_logprobs
+            chat_request["logprobs"] = True
         if extra:
             chat_request["extra_body"] = extra
         
@@ -453,15 +492,17 @@ class OpenAIResponsesConverter:
             elif item_type == "input_image":
                 has_multimodal = True
                 image_url = item.get("image_url", "")
+                file_id = item.get("file_id")
                 detail = item.get("detail")  # Responses API 支持 detail 参数
                 img_obj = {}
                 if image_url:
                     img_obj["url"] = image_url
-                else:
-                    # base64 图片
-                    data_url = item.get("image_url", item.get("data", ""))
-                    if data_url:
-                        img_obj["url"] = data_url
+                elif file_id:
+                    # Responses API input_image 支持 file_id，Chat API 无直接等价
+                    # 降级为文本占位
+                    text_parts.append(f"[Image file: {file_id}]")
+                    content_parts.append({"type": "text", "text": f"[Image file: {file_id}]"})
+                    has_multimodal = True
                 if detail and img_obj:
                     img_obj["detail"] = detail
                 if img_obj:
@@ -694,7 +735,19 @@ class OpenAIResponsesConverter:
     def from_openai_chat_request(cls, request: Dict[str, Any]) -> Dict[str, Any]:
         """
         OpenAI Chat 请求转换为 OpenAI Responses 格式
+        
+        Args:
+            request: OpenAI Chat 格式请求
+            
+        Returns:
+            Dict: OpenAI Responses 格式请求
+            
+        Raises:
+            TypeError: 如果 request 不是字典
         """
+        if not isinstance(request, dict):
+            raise TypeError(f"request must be a dict, got {type(request).__name__}")
+        
         messages = request.get("messages", [])
         
         # 提取简单文本输入（用于 OpenRouter 等兼容 API）
@@ -814,6 +867,30 @@ class OpenAIResponsesConverter:
             responses_request["tool_choice"] = cls._convert_chat_tool_choice_to_responses(request["tool_choice"])
         if request.get("parallel_tool_calls") is not None:
             responses_request["parallel_tool_calls"] = request["parallel_tool_calls"]
+        
+        # Chat web_search_options → Responses web_search 工具内嵌配置
+        # Chat API: 顶层 web_search_options 参数
+        # Responses API: web_search 工具内的 search_context_size 和 user_location
+        if request.get("web_search_options"):
+            ws_opts = request["web_search_options"]
+            if isinstance(ws_opts, dict):
+                # 更新已有的 web_search 工具或添加新的
+                tools_list = responses_request.get("tools", [])
+                ws_tool_idx = None
+                for i, t in enumerate(tools_list):
+                    if isinstance(t, dict) and t.get("type") in ("web_search", "web_search_preview"):
+                        ws_tool_idx = i
+                        break
+                ws_tool = tools_list[ws_tool_idx] if ws_tool_idx is not None else {"type": "web_search"}
+                if ws_opts.get("search_context_size"):
+                    ws_tool["search_context_size"] = ws_opts["search_context_size"]
+                if ws_opts.get("user_location"):
+                    ws_tool["user_location"] = ws_opts["user_location"]
+                if ws_tool_idx is not None:
+                    tools_list[ws_tool_idx] = ws_tool
+                else:
+                    tools_list.append(ws_tool)
+                responses_request["tools"] = tools_list
         if request.get("store") is not None:
             responses_request["store"] = request["store"]
         if request.get("metadata"):
@@ -834,12 +911,17 @@ class OpenAIResponsesConverter:
             fmt = request["response_format"]
             fmt_type = fmt.get("type", "")
             if fmt_type == "json_schema":
-                responses_request["text"] = {
-                    "format": {
-                        "type": "json_schema",
-                        "json_schema": fmt.get("json_schema", {})
-                    }
-                }
+                # Chat API: {"type": "json_schema", "json_schema": {"name": "...", "schema": {...}, "strict": bool}}
+                # Responses API: {"type": "json_schema", "name": "...", "schema": {...}, "strict": bool}
+                json_schema = fmt.get("json_schema", {})
+                text_format = {"type": "json_schema"}
+                if json_schema.get("name"):
+                    text_format["name"] = json_schema["name"]
+                if json_schema.get("schema"):
+                    text_format["schema"] = json_schema["schema"]
+                if json_schema.get("strict") is not None:
+                    text_format["strict"] = json_schema["strict"]
+                responses_request["text"] = {"format": text_format}
             elif fmt_type == "json_object":
                 responses_request["text"] = {"format": {"type": "json_object"}}
             elif fmt_type == "text":
@@ -875,6 +957,19 @@ class OpenAIResponsesConverter:
         if request.get("top_logprobs") is not None:
             responses_request["top_logprobs"] = request["top_logprobs"]
         
+        # stream_options: Chat include_usage 不等价于 Responses include_obfuscation
+        # Chat stream_options.include_usage → Responses 不支持，放入 extra_body
+        # Responses stream_options.include_obfuscation → 如果有则恢复
+        if request.get("stream_options"):
+            stream_opts = request["stream_options"]
+            if isinstance(stream_opts, dict) and stream_opts.get("include_obfuscation") is not None:
+                responses_request["stream_options"] = {"include_obfuscation": stream_opts["include_obfuscation"]}
+            elif isinstance(stream_opts, dict) and stream_opts.get("include_usage") is not None:
+                # include_usage 在 Responses API 中不需要（Responses 自动在 completed 事件中返回 usage）
+                if "extra_body" not in responses_request:
+                    responses_request["extra_body"] = {}
+                responses_request["extra_body"]["stream_options"] = stream_opts
+        
         # logprobs
         if request.get("logprobs") is not None:
             if "extra_body" not in responses_request:
@@ -900,8 +995,356 @@ class OpenAIResponsesConverter:
         
         return responses_request
     
+    # ================================================================
+    # 请求转换：Responses -> Anthropic (直接转换，避免经 Chat 中转丢失数据)
+    # ================================================================
+    
     @classmethod
-    def _convert_chat_content_to_responses(cls, content: List[Dict]) -> List[Dict]:
+    def to_anthropic_request(cls, request: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        OpenAI Responses 请求直接转换为 Anthropic 格式
+        
+        直接转换路径，保留 Responses 特有的 reasoning/text 等参数，
+        避免经 Chat 中转时的数据丢失。
+        """
+        from .anthropic import AnthropicConverter
+        
+        anthropic_messages = []
+        
+        # 1. 处理 input
+        input_data = request.get("input", [])
+        if isinstance(input_data, str):
+            anthropic_messages.append({"role": "user", "content": input_data})
+        elif isinstance(input_data, list):
+            for item in input_data:
+                msg = cls._convert_input_item_to_anthropic(item)
+                if msg:
+                    if isinstance(msg, list):
+                        anthropic_messages.extend(msg)
+                    else:
+                        anthropic_messages.append(msg)
+        
+        # 2. 处理 instructions → system
+        system_prompt = None
+        instructions = request.get("instructions")
+        if instructions:
+            if isinstance(instructions, str):
+                system_prompt = instructions
+            elif isinstance(instructions, list):
+                inst_parts = []
+                for inst_item in instructions:
+                    if isinstance(inst_item, str):
+                        inst_parts.append(inst_item)
+                    elif isinstance(inst_item, dict):
+                        inst_type = inst_item.get("type", "")
+                        if inst_type == "message":
+                            content = inst_item.get("content", "")
+                            if isinstance(content, list):
+                                texts = []
+                                for c in content:
+                                    if isinstance(c, dict) and c.get("type") in ("text", "input_text"):
+                                        texts.append(c.get("text", ""))
+                                inst_parts.append("\n".join(texts))
+                            else:
+                                inst_parts.append(str(content))
+                        elif "text" in inst_item:
+                            inst_parts.append(inst_item["text"])
+                if inst_parts:
+                    system_prompt = "\n\n".join(inst_parts)
+        
+        # 3. 转换 tools
+        raw_tools = request.get("tools", [])
+        anthropic_tools = cls._convert_tools_to_anthropic(raw_tools)
+        
+        # 4. 转换 tool_choice
+        tool_choice = cls._convert_tool_choice_to_anthropic(request.get("tool_choice"))
+        
+        # 5. 构建 Anthropic 请求
+        anthropic_request = {
+            "model": request.get("model", "claude-sonnet-4-20250514"),
+            "max_tokens": request.get("max_output_tokens", 4096),
+            "messages": anthropic_messages,
+        }
+        
+        if system_prompt:
+            anthropic_request["system"] = system_prompt
+        if request.get("stream") is not None:
+            anthropic_request["stream"] = request["stream"]
+        if request.get("temperature") is not None:
+            anthropic_request["temperature"] = request["temperature"]
+        if request.get("top_p") is not None:
+            anthropic_request["top_p"] = request["top_p"]
+        if anthropic_tools:
+            anthropic_request["tools"] = anthropic_tools
+        if tool_choice is not None:
+            anthropic_request["tool_choice"] = tool_choice
+        
+        # 6. reasoning -> thinking
+        reasoning = request.get("reasoning")
+        if reasoning and isinstance(reasoning, dict):
+            effort = reasoning.get("effort")
+            if effort:
+                effort_budget_map = {
+                    "none": 0,
+                    "minimal": 0,
+                    "low": 1024,
+                    "medium": 10000,
+                    "high": 32000,
+                    "xhigh": 64000,
+                }
+                budget = effort_budget_map.get(effort, 10000)
+                if budget > 0:
+                    thinking_config = {"type": "enabled", "budget_tokens": budget}
+                    anthropic_request["thinking"] = thinking_config
+                else:
+                    anthropic_request["thinking"] = {"type": "disabled"}
+        
+        # 7. text.format -> 无直接映射（Anthropic 不支持 response_format）
+        
+        # 8. metadata.user_id
+        metadata = request.get("metadata")
+        if metadata and isinstance(metadata, dict):
+            user_id = metadata.get("user_id")
+            if user_id:
+                anthropic_request["metadata"] = {"user_id": user_id}
+            # 保留完整 metadata
+            anthropic_request["metadata"] = metadata
+        
+        # 9. service_tier 映射
+        if request.get("service_tier"):
+            tier_map = {"default": "standard_only", "auto": "auto"}
+            anthropic_request["service_tier"] = tier_map.get(request["service_tier"], request["service_tier"])
+        
+        # 10. Responses 特有参数（Anthropic 不支持的，放入 extra_body）
+        extra = {}
+        if request.get("previous_response_id"):
+            extra["previous_response_id"] = request["previous_response_id"]
+        if request.get("truncation"):
+            extra["truncation"] = request["truncation"]
+        if request.get("parallel_tool_calls") is not None:
+            extra["parallel_tool_calls"] = request["parallel_tool_calls"]
+        if request.get("max_tool_calls") is not None:
+            extra["max_tool_calls"] = request["max_tool_calls"]
+        if request.get("background") is not None:
+            extra["background"] = request["background"]
+        if request.get("conversation"):
+            extra["conversation"] = request["conversation"]
+        if request.get("context_management"):
+            extra["context_management"] = request["context_management"]
+        if request.get("include"):
+            extra["include"] = request["include"]
+        if request.get("prompt"):
+            extra["prompt"] = request["prompt"]
+        if request.get("store") is not None:
+            extra["store"] = request["store"]
+        if request.get("safety_identifier"):
+            extra["safety_identifier"] = request["safety_identifier"]
+        if request.get("prompt_cache_key"):
+            extra["prompt_cache_key"] = request["prompt_cache_key"]
+        if request.get("prompt_cache_retention"):
+            extra["prompt_cache_retention"] = request["prompt_cache_retention"]
+        if request.get("user"):
+            extra["user"] = request["user"]
+        if request.get("top_logprobs") is not None:
+            extra["top_logprobs"] = request["top_logprobs"]
+        if request.get("frequency_penalty") is not None:
+            extra["frequency_penalty"] = request["frequency_penalty"]
+        if request.get("presence_penalty") is not None:
+            extra["presence_penalty"] = request["presence_penalty"]
+        if request.get("logit_bias") is not None:
+            extra["logit_bias"] = request["logit_bias"]
+        if request.get("seed") is not None:
+            extra["seed"] = request["seed"]
+        if request.get("stop"):
+            extra["stop"] = request["stop"]
+        if extra:
+            anthropic_request["extra_body"] = extra
+        
+        return anthropic_request
+    
+    @classmethod
+    def _convert_input_item_to_anthropic(cls, item: Dict[str, Any]) -> Optional[Union[Dict, List[Dict]]]:
+        """转换 Responses 输入项到 Anthropic 消息格式"""
+        if not isinstance(item, dict):
+            return None
+        
+        item_type = item.get("type", "")
+        
+        if item_type == "message":
+            role = item.get("role", "user")
+            # Anthropic 只支持 user/assistant 角色
+            if role not in ("user", "assistant"):
+                role = "user"
+            content = item.get("content", [])
+            anthropic_content = cls._convert_content_to_anthropic(content)
+            if isinstance(anthropic_content, str):
+                return {"role": role, "content": anthropic_content}
+            return {"role": role, "content": anthropic_content}
+        
+        elif item_type == "function_call_output":
+            # 工具结果 → tool_result 块
+            return {
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": item.get("call_id", ""),
+                    "content": item.get("output", "")
+                }]
+            }
+        
+        elif item_type == "function_call":
+            # assistant 的工具调用
+            args_str = item.get("arguments", "{}")
+            try:
+                import json as _json
+                args_obj = _json.loads(args_str) if isinstance(args_str, str) else args_str
+            except Exception:
+                args_obj = {}
+            return {
+                "role": "assistant",
+                "content": [{
+                    "type": "tool_use",
+                    "id": item.get("call_id", item.get("id", "")),
+                    "name": item.get("name", ""),
+                    "input": args_obj
+                }]
+            }
+        
+        elif item_type == "reasoning":
+            # 推理项 - Anthropic 不支持在输入中传递 reasoning，跳过
+            return None
+        
+        elif item_type == "computer_call_output":
+            return {
+                "role": "user",
+                "content": "[Computer screenshot output]"
+            }
+        
+        elif item_type == "local_shell_call_output":
+            return {
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": item.get("call_id", ""),
+                    "content": str(item.get("output", ""))
+                }]
+            }
+        
+        elif item_type == "mcp_approval_response":
+            return None
+        
+        elif item_type == "input_audio":
+            return {
+                "role": "user",
+                "content": "[Audio input]"
+            }
+        
+        # 未知类型，尝试作为消息处理
+        if "role" in item and "content" in item:
+            role = item.get("role", "user")
+            if role not in ("user", "assistant"):
+                role = "user"
+            return {"role": role, "content": str(item.get("content", ""))}
+        
+        return None
+    
+    @classmethod
+    def _convert_content_to_anthropic(cls, content: Union[str, List[Dict]]) -> Union[str, List[Dict]]:
+        """转换 Responses 内容为 Anthropic 格式"""
+        if isinstance(content, str):
+            return content
+        if not isinstance(content, list):
+            return str(content)
+        
+        content_blocks = []
+        for item in content:
+            if not isinstance(item, dict):
+                content_blocks.append({"type": "text", "text": str(item)})
+                continue
+            
+            item_type = item.get("type", "")
+            
+            if item_type in ("text", "input_text"):
+                content_blocks.append({"type": "text", "text": item.get("text", "")})
+            elif item_type == "input_image":
+                image_url = item.get("image_url", "")
+                if image_url:
+                    if image_url.startswith("data:"):
+                        # data:image/png;base64,...
+                        parts = image_url.split(";", 1)
+                        media_type = parts[0].replace("data:", "") if len(parts) > 1 else "image/png"
+                        data = parts[1].replace("base64,", "") if len(parts) > 1 else ""
+                        content_blocks.append({
+                            "type": "image",
+                            "source": {"type": "base64", "media_type": media_type, "data": data}
+                        })
+                    else:
+                        content_blocks.append({
+                            "type": "image",
+                            "source": {"type": "url", "url": image_url}
+                        })
+            elif item_type == "input_file":
+                file_data = item.get("file_data", "")
+                file_id = item.get("file_id")
+                filename = item.get("filename", "")
+                if file_data:
+                    if file_data.startswith("data:"):
+                        parts = file_data.split(";", 1)
+                        media_type = parts[0].replace("data:", "") if len(parts) > 1 else "application/pdf"
+                        data = parts[1].replace("base64,", "") if len(parts) > 1 else ""
+                        content_blocks.append({
+                            "type": "document",
+                            "source": {"type": "base64", "media_type": media_type, "data": data}
+                        })
+                    else:
+                        content_blocks.append({"type": "text", "text": f"[File: {filename or file_data}]"})
+                elif file_id:
+                    content_blocks.append({"type": "text", "text": f"[File ID: {file_id}]"})
+            elif item_type == "output_text":
+                content_blocks.append({"type": "text", "text": item.get("text", "")})
+            else:
+                text = item.get("text", item.get("content", ""))
+                if text:
+                    content_blocks.append({"type": "text", "text": str(text)})
+        
+        return content_blocks if content_blocks else ""
+    
+    @classmethod
+    def _convert_tools_to_anthropic(cls, tools: List[Dict]) -> List[Dict]:
+        """转换 Responses 工具定义为 Anthropic 格式"""
+        converted = []
+        for tool in tools:
+            if not isinstance(tool, dict):
+                continue
+            tool_type = tool.get("type", "function")
+            
+            if tool_type == "function":
+                at = {"name": tool.get("name", ""), "input_schema": tool.get("parameters", {"type": "object", "properties": {}})}
+                if tool.get("description"):
+                    at["description"] = tool["description"]
+                converted.append(at)
+            # 其他 Responses 工具类型（web_search, file_search 等）Anthropic 不直接支持，跳过
+        
+        return converted
+    
+    @classmethod
+    def _convert_tool_choice_to_anthropic(cls, tool_choice: Any) -> Any:
+        """转换 Responses tool_choice 为 Anthropic 格式"""
+        if tool_choice is None:
+            return None
+        if isinstance(tool_choice, str):
+            tc_map = {"auto": "auto", "none": "none", "required": "any"}
+            return tc_map.get(tool_choice, tool_choice)
+        if isinstance(tool_choice, dict):
+            tc_type = tool_choice.get("type", "")
+            if tc_type == "function":
+                return {"type": "tool", "name": tool_choice.get("name", "")}
+            if tc_type in ("mcp", "custom", "apply_patch", "shell", "allowed", "types"):
+                name = tool_choice.get("name", "")
+                if name:
+                    return {"type": "tool", "name": name}
+                return "auto"
+        return None
         """转换 Chat 内容数组为 Responses 输入内容格式"""
         result = []
         for item in content:
@@ -954,13 +1397,12 @@ class OpenAIResponsesConverter:
                 if func.get("strict") is not None:
                     rt["strict"] = func["strict"]
                 result.append(rt)
-            elif tool_type == "web_search":
-                ws_opts = tool.get("web_search_options", {})
+            elif tool_type in ("web_search", "web_search_preview"):
+                # Chat API: web_search_preview 工具 + 顶层 web_search_options 参数
+                # Responses API: web_search 工具 + 工具内 user_location/search_context_size
                 rt = {"type": "web_search"}
-                if ws_opts.get("search_context_size"):
-                    rt["search_context_size"] = ws_opts["search_context_size"]
-                if ws_opts.get("user_location"):
-                    rt["user_location"] = ws_opts["user_location"]
+                # 注意：web_search_options 是顶层请求参数，不在 tool 定义内部
+                # 此处仅处理工具本身，search_context_size/user_location 由调用方从请求中提取
                 result.append(rt)
             else:
                 # 其他类型直接传递
@@ -1086,8 +1528,6 @@ class OpenAIResponsesConverter:
                         "refusal": refusal,
                     }]
                 })
-            
-            if refusal:
                 status = "incomplete"
                 incomplete_details = {"reason": "content_filter"}
             
@@ -1131,7 +1571,7 @@ class OpenAIResponsesConverter:
             "model": response.get("model", ""),
             "output": output,
             "usage": response_usage,
-            "incomplete_details": incomplete_details,
+            "incomplete_details": incomplete_details,  # Responses API: 始终存在，null 表示完成
             "error": None,
             "metadata": response.get("metadata"),
             "parallel_tool_calls": True,  # Chat API 默认允许并行工具调用
@@ -1551,6 +1991,20 @@ class OpenAIResponsesConverter:
                 # Anthropic 没有直接暴露 reasoning_tokens，但保留为参考
                 pass
         
+        # Responses service_tier → Anthropic usage.service_tier
+        responses_service_tier = response.get("service_tier")
+        if responses_service_tier:
+            responses_to_anthropic_tier = {
+                "default": "standard",
+                "auto": "standard",
+                "flex": "standard",
+                "scale": "standard",
+                "priority": "priority",
+            }
+            anthropic_usage["service_tier"] = responses_to_anthropic_tier.get(
+                responses_service_tier, responses_service_tier
+            )
+        
         result = {
             "id": response.get("id", f"msg_{uuid.uuid4().hex[:24]}"),
             "type": "message",
@@ -1739,6 +2193,26 @@ class OpenAIResponsesConverter:
                 
                 # 如果有 id，是新的 function_call 开始
                 if tc_id and tc_id not in cls._stream_state["started_function_ids"]:
+                    # 关闭之前的 reasoning 项（如果有）
+                    if cls._stream_state["reasoning_item_started"]:
+                        events.append({
+                            "type": "response.reasoning_text.done",
+                            "output_index": cls._stream_state["output_index"],
+                            "text": ""
+                        })
+                        events.append({
+                            "type": "response.output_item.done",
+                            "output_index": cls._stream_state["output_index"],
+                            "item": {
+                                "type": "reasoning",
+                                "id": f"rs_{uuid.uuid4().hex[:24]}",
+                                "status": "completed",
+                                "content": []
+                            }
+                        })
+                        cls._stream_state["reasoning_item_started"] = False
+                        cls._stream_state["output_index"] += 1
+                    
                     # 关闭之前的消息项（如果有）
                     if cls._stream_state["message_item_started"]:
                         if cls._stream_state["content_part_started"]:

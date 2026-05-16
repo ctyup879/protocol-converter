@@ -3064,15 +3064,28 @@ class TestResponsesTopLevelParams:
         assert result.get("extra_body", {}).get("prompt_cache_retention") is None
 
     def test_stream_options_as_toplevel(self):
-        """测试 stream_options 应为 Chat 顶层参数"""
+        """测试 stream_options 处理：include_obfuscation 是 Responses 特有字段，放入 extra_body"""
         request = {
             "model": "gpt-4o",
             "input": "Hello",
             "stream_options": {"include_obfuscation": True}
         }
         result = OpenAIResponsesConverter.to_openai_chat(request)
-        assert result.get("stream_options") == {"include_obfuscation": True}
-        assert result.get("extra_body", {}).get("stream_options") is None
+        # include_obfuscation 是 Responses 特有字段，Chat API 不支持，放入 extra_body
+        assert result.get("extra_body", {}).get("stream_options") == {"include_obfuscation": True}
+        # 顶层不应有 stream_options（include_obfuscation 不是 Chat API 参数）
+        assert result.get("stream_options") is None
+
+    def test_stream_options_include_usage_passthrough(self):
+        """测试 stream_options 的 include_usage 直接传递（Chat API 原生支持）"""
+        request = {
+            "model": "gpt-4o",
+            "input": "Hello",
+            "stream_options": {"include_usage": True}
+        }
+        result = OpenAIResponsesConverter.to_openai_chat(request)
+        # include_usage 是 Chat API 原生支持的 stream_options 字段，直接传递
+        assert result.get("stream_options") == {"include_usage": True}
 
 
 class TestMaxCompletionTokensZero:
@@ -4366,3 +4379,363 @@ class TestBugFixes:
         system_msg = {"role": "system", "content": "System prompt"}
         result = AnthropicConverter._convert_message(system_msg)
         assert len(result) == 0
+
+
+class TestBugFixesV1_9_0:
+    """v1.9.0 缺陷修复测试"""
+
+    def test_from_anthropic_preserves_max_completion_tokens(self):
+        """测试 _from_anthropic 保留 max_completion_tokens 字段"""
+        anthropic_request = {
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 2048,
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+        result = OpenAIChatConverter.to_openai_chat(anthropic_request)
+        assert result.max_completion_tokens == 2048
+
+    def test_from_anthropic_preserves_reasoning_effort(self):
+        """测试 _from_anthropic 保留 reasoning_effort 字段"""
+        anthropic_request = {
+            "model": "claude-opus-4-6",
+            "max_tokens": 16000,
+            "thinking": {"type": "enabled", "budget_tokens": 32000},
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+        result = OpenAIChatConverter.to_openai_chat(anthropic_request)
+        assert result.reasoning_effort is not None
+
+    def test_from_anthropic_preserves_parallel_tool_calls(self):
+        """测试 _from_anthropic 保留 parallel_tool_calls 字段"""
+        anthropic_request = {
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
+        }
+        result = OpenAIChatConverter.to_openai_chat(anthropic_request)
+        assert result.parallel_tool_calls is False
+
+    def test_from_anthropic_preserves_service_tier(self):
+        """测试 _from_anthropic 保留 service_tier 字段"""
+        anthropic_request = {
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "service_tier": "standard_only",
+        }
+        result = OpenAIChatConverter.to_openai_chat(anthropic_request)
+        assert result.service_tier == "default"
+
+    def test_responses_text_format_json_schema_to_chat(self):
+        """测试 Responses text.format json_schema 正确转换为 Chat response_format
+        
+        Responses API: {"type": "json_schema", "name": "...", "schema": {...}}
+        Chat API: {"type": "json_schema", "json_schema": {"name": "...", "schema": {...}}}
+        """
+        request = {
+            "model": "gpt-4o",
+            "input": "Generate JSON",
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "my_schema",
+                    "schema": {"type": "object", "properties": {"name": {"type": "string"}}},
+                    "strict": True,
+                }
+            }
+        }
+        result = OpenAIResponsesConverter.to_openai_chat(request)
+        assert "response_format" in result
+        assert result["response_format"]["type"] == "json_schema"
+        # json_schema 内部不应包含 type 字段
+        json_schema = result["response_format"]["json_schema"]
+        assert "type" not in json_schema
+        assert json_schema["name"] == "my_schema"
+        assert "schema" in json_schema
+        assert json_schema["strict"] is True
+
+    def test_chat_response_format_json_schema_to_responses(self):
+        """测试 Chat response_format json_schema 正确转换为 Responses text.format
+        
+        Chat API: {"type": "json_schema", "json_schema": {"name": "...", "schema": {...}}}
+        Responses API: {"type": "json_schema", "name": "...", "schema": {...}}
+        """
+        request = {
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Generate JSON"}],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "my_schema",
+                    "schema": {"type": "object", "properties": {"name": {"type": "string"}}},
+                    "strict": True,
+                }
+            }
+        }
+        result = OpenAIResponsesConverter.from_openai_chat_request(request)
+        assert "text" in result
+        text_format = result["text"]["format"]
+        assert text_format["type"] == "json_schema"
+        # Responses format 不应有嵌套的 json_schema，字段应在顶层
+        assert "json_schema" not in text_format
+        assert text_format["name"] == "my_schema"
+        assert "schema" in text_format
+        assert text_format["strict"] is True
+
+    def test_responses_json_schema_round_trip(self):
+        """测试 Responses json_schema 格式与 Chat 格式互转的往返一致性"""
+        # Responses → Chat
+        responses_request = {
+            "model": "gpt-4o",
+            "input": "Generate JSON",
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "test_schema",
+                    "schema": {"type": "object", "properties": {"id": {"type": "integer"}}},
+                    "strict": False,
+                }
+            }
+        }
+        chat_result = OpenAIResponsesConverter.to_openai_chat(responses_request)
+        
+        # Chat → Responses
+        chat_request = {
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Generate JSON"}],
+            "response_format": chat_result["response_format"],
+        }
+        responses_result = OpenAIResponsesConverter.from_openai_chat_request(chat_request)
+        
+        # 验证往返一致性
+        original_format = responses_request["text"]["format"]
+        round_trip_format = responses_result["text"]["format"]
+        assert original_format["type"] == round_trip_format["type"]
+        assert original_format["name"] == round_trip_format["name"]
+        assert original_format["schema"] == round_trip_format["schema"]
+        assert original_format.get("strict") == round_trip_format.get("strict")
+
+    def test_responses_streaming_reasoning_to_tool_calls_transition(self):
+        """测试 Responses 流式转换中 reasoning 项在 tool_calls 开始时正确关闭"""
+        # 先发 response.created
+        start_chunk = {
+            "id": "resp_123",
+            "model": "o3",
+            "choices": [{"delta": {"role": "assistant"}, "index": 0}]
+        }
+        OpenAIResponsesConverter.convert_stream_chunk(start_chunk)
+
+        # 发送 reasoning 内容
+        reasoning_chunk = {
+            "id": "resp_123",
+            "model": "o3",
+            "choices": [{"delta": {"reasoning_content": "Thinking..."}, "index": 0}]
+        }
+        events = OpenAIResponsesConverter.convert_stream_chunk(reasoning_chunk)
+        assert any(e["type"] == "response.output_item.added" for e in events)
+
+        # 发送 tool_calls（直接从 reasoning 过渡，无文本内容）
+        tool_chunk = {
+            "id": "resp_123",
+            "model": "o3",
+            "choices": [{"delta": {"tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "search", "arguments": "{}"}, "index": 0}]}, "index": 0}]
+        }
+        events = OpenAIResponsesConverter.convert_stream_chunk(tool_chunk)
+
+        # 验证 reasoning 项被关闭
+        reasoning_done_events = [e for e in events if e["type"] == "response.reasoning_text.done"]
+        reasoning_item_done = [e for e in events if e["type"] == "response.output_item.done" and e.get("item", {}).get("type") == "reasoning"]
+        assert len(reasoning_done_events) >= 1, "reasoning_text.done event should be emitted when tool calls start"
+        assert len(reasoning_item_done) >= 1, "reasoning output_item.done should be emitted when tool calls start"
+
+    def test_responses_from_openai_chat_incomplete_details_always_present(self):
+        """测试 Responses 响应始终包含 incomplete_details 字段"""
+        # 完成状态
+        chat_response = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{
+                "message": {"content": "Hello!"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        }
+        result = OpenAIResponsesConverter.from_openai_chat(chat_response)
+        assert "incomplete_details" in result
+        assert result["incomplete_details"] is None
+
+    def test_anthropic_from_chat_preserves_content_none(self):
+        """测试 Chat 响应中 content=None 正确转换为 Anthropic 空内容"""
+        chat_response = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{
+                "message": {"content": None, "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "test", "arguments": "{}"}}]},
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        }
+        result = AnthropicConverter.from_openai_chat(chat_response)
+        # 不应包含空文本块，只有 tool_use
+        text_blocks = [b for b in result["content"] if b["type"] == "text"]
+        tool_blocks = [b for b in result["content"] if b["type"] == "tool_use"]
+        assert len(tool_blocks) == 1
+        # content=None 不应产生文本块
+        assert all(b.get("text", "") != "" for b in text_blocks)
+
+
+class TestBugFixesV1_10_0:
+    """v1.10.0 修复的测试"""
+
+    def test_top_logprobs_sets_logprobs_true(self):
+        """测试 Responses top_logprobs → Chat 时自动设置 logprobs=True"""
+        request = {
+            "model": "gpt-4o",
+            "input": "Hello",
+            "top_logprobs": 5
+        }
+        result = OpenAIResponsesConverter.to_openai_chat(request)
+        # Chat API 要求 logprobs=True 才能使用 top_logprobs
+        assert result.get("logprobs") is True
+        assert result.get("top_logprobs") == 5
+
+    def test_input_image_file_id_fallback(self):
+        """测试 Responses input_image 的 file_id 降级为文本占位"""
+        request = {
+            "model": "gpt-4o",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_image", "file_id": "file-abc123"}]
+            }]
+        }
+        result = OpenAIResponsesConverter.to_openai_chat(request)
+        # file_id 在 Chat API 中无直接等价，应降级为文本占位
+        messages = result.get("messages", [])
+        assert len(messages) > 0
+        content = messages[-1].get("content")
+        if isinstance(content, list):
+            text_parts = [p for p in content if p.get("type") == "text"]
+            assert any("file-abc123" in p.get("text", "") for p in text_parts)
+        elif isinstance(content, str):
+            assert "file-abc123" in content
+
+    def test_chat_web_search_options_to_responses(self):
+        """测试 Chat web_search_options 正确映射到 Responses web_search 工具"""
+        chat_request = {
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tools": [{"type": "web_search_preview"}],
+            "web_search_options": {
+                "search_context_size": "high",
+                "user_location": {"type": "approximate", "approximate": {"city": "SF"}}
+            }
+        }
+        result = OpenAIResponsesConverter.from_openai_chat_request(chat_request)
+        tools = result.get("tools", [])
+        ws_tool = next((t for t in tools if t.get("type") == "web_search"), None)
+        assert ws_tool is not None
+        assert ws_tool.get("search_context_size") == "high"
+        assert ws_tool.get("user_location") is not None
+
+    def test_responses_to_anthropic_request_direct(self):
+        """测试 Responses 请求直接转换为 Anthropic 格式"""
+        request = {
+            "model": "gpt-4o",
+            "input": "Hello",
+            "instructions": "You are helpful.",
+            "max_output_tokens": 1024,
+            "temperature": 0.7,
+            "reasoning": {"effort": "high"},
+        }
+        result = OpenAIResponsesConverter.to_anthropic_request(request)
+        assert result["model"] == "gpt-4o"
+        assert result["max_tokens"] == 1024
+        assert result["system"] == "You are helpful."
+        assert result["temperature"] == 0.7
+        assert result["thinking"] == {"type": "enabled", "budget_tokens": 32000}
+        assert len(result["messages"]) == 1
+        assert result["messages"][0]["role"] == "user"
+
+    def test_responses_to_anthropic_request_with_tools(self):
+        """测试 Responses 请求带工具直接转换为 Anthropic 格式"""
+        request = {
+            "model": "gpt-4o",
+            "input": "What's the weather?",
+            "max_output_tokens": 100,
+            "tools": [{"type": "function", "name": "get_weather", "description": "Get weather", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}],
+            "tool_choice": "required",
+        }
+        result = OpenAIResponsesConverter.to_anthropic_request(request)
+        assert len(result.get("tools", [])) == 1
+        assert result["tools"][0]["name"] == "get_weather"
+        assert result["tool_choice"] == "any"
+
+    def test_responses_to_anthropic_request_preserves_extra_params(self):
+        """测试 Responses→Anthropic 请求保留 Responses 特有参数"""
+        request = {
+            "model": "gpt-4o",
+            "input": "Hello",
+            "max_output_tokens": 100,
+            "previous_response_id": "resp_123",
+            "truncation": "auto",
+            "store": True,
+            "safety_identifier": "user-abc",
+        }
+        result = OpenAIResponsesConverter.to_anthropic_request(request)
+        extra = result.get("extra_body", {})
+        assert extra.get("previous_response_id") == "resp_123"
+        assert extra.get("truncation") == "auto"
+        assert extra.get("store") is True
+        assert extra.get("safety_identifier") == "user-abc"
+
+    def test_responses_to_anthropic_response_service_tier(self):
+        """测试 Responses→Anthropic 响应 service_tier 映射"""
+        response = {
+            "id": "resp_123",
+            "object": "response",
+            "status": "completed",
+            "model": "gpt-4o",
+            "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Hi"}]}],
+            "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+            "service_tier": "priority",
+        }
+        result = OpenAIResponsesConverter.to_anthropic(response)
+        assert result["usage"].get("service_tier") == "priority"
+
+    def test_converter_type_validation(self):
+        """测试转换器输入类型校验"""
+        import pytest
+        with pytest.raises(TypeError):
+            AnthropicConverter.to_openai_chat("not a dict")
+        with pytest.raises(TypeError):
+            OpenAIResponsesConverter.to_openai_chat("not a dict")
+        with pytest.raises(TypeError):
+            OpenAIResponsesConverter.from_openai_chat_request("not a dict")
+        with pytest.raises(TypeError):
+            AnthropicConverter.from_openai_chat("not a dict")
+
+    def test_chat_stream_options_include_usage_to_responses(self):
+        """测试 Chat stream_options.include_usage 不传递给 Responses（Responses 自动包含）"""
+        chat_request = {
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream_options": {"include_usage": True}
+        }
+        result = OpenAIResponsesConverter.from_openai_chat_request(chat_request)
+        # include_usage 在 Responses API 中不需要（自动在 completed 事件中返回）
+        assert result.get("stream_options") is None
+        # 保留在 extra_body 供参考
+        assert result.get("extra_body", {}).get("stream_options") == {"include_usage": True}
+
+    def test_chat_stream_options_include_obfuscation_to_responses(self):
+        """测试 Chat 中来自 Responses 的 stream_options.include_obfuscation 正确恢复"""
+        chat_request = {
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream_options": {"include_obfuscation": True}
+        }
+        result = OpenAIResponsesConverter.from_openai_chat_request(chat_request)
+        # include_obfuscation 是 Responses 特有字段，应正确传递
+        assert result.get("stream_options") == {"include_obfuscation": True}
