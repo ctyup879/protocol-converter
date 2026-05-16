@@ -121,7 +121,7 @@ class ProtocolDetector:
         
         # Anthropic 的关键特征：检查模型名称（claude- 开头）
         model = request.get("model", "")
-        if model.startswith("claude-"):
+        if isinstance(model, str) and model.startswith("claude-"):
             return True
         
         # Anthropic 特有参数
@@ -231,7 +231,7 @@ class ProtocolDetector:
         # 如果有 max_tokens 且模型是 claude-，这可能是 Anthropic（已在上面检测）
         # OpenAI Chat 通常使用 gpt- 系列模型
         model = request.get("model", "")
-        if model.startswith("claude-"):
+        if isinstance(model, str) and model.startswith("claude-"):
             return False
         
         return True

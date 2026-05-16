@@ -202,7 +202,7 @@ class AnthropicConverter:
         
         # 5. 构建 Chat 请求
         chat_request = {
-            "model": request.get("model", "claude-sonnet-4-20250514"),
+            "model": request.get("model") or "claude-sonnet-4-20250514",
             "messages": messages,
         }
         
@@ -224,8 +224,9 @@ class AnthropicConverter:
             chat_request["parallel_tool_calls"] = parallel_tool_calls_from_tc
         if request.get("stop_sequences"):
             chat_request["stop"] = request["stop_sequences"]
-        if request.get("metadata"):
-            user_id = request["metadata"].get("user_id")
+        metadata = request.get("metadata")
+        if metadata and isinstance(metadata, dict):
+            user_id = metadata.get("user_id")
             if user_id:
                 chat_request["user"] = user_id
         if request.get("service_tier"):
@@ -708,6 +709,15 @@ class AnthropicConverter:
         content_blocks = []
         stop_reason = "end_turn"
         stop_details = None
+        
+        # 如果响应顶层包含 error 字段，映射为 refusal
+        error = response.get("error")
+        if error:
+            stop_reason = "refusal"
+            if isinstance(error, dict):
+                stop_details = {"reason": "content_policy", "message": error.get("message", "")}
+            else:
+                stop_details = {"reason": "content_policy", "message": str(error)}
         
         for choice in choices:
             message = choice.get("message", {})
@@ -1473,7 +1483,7 @@ class AnthropicConverter:
             "id": response.get("id", f"resp_{uuid.uuid4().hex[:24]}"),
             "object": "response",
             "status": status,
-            "created_at": time.time(),
+            "created_at": int(time.time()),
             "model": response.get("model", ""),
             "output": output,
             "usage": response_usage,

@@ -181,6 +181,9 @@ class OpenAIResponsesConverter:
                 })
             elif isinstance(instructions, list):
                 # instructions 为数组时，逐项转换
+                # 收集多模态内容块，最后合并为单条 developer 消息
+                inst_content_parts = []
+                inst_text_parts = []
                 for inst_item in reversed(instructions):
                     if isinstance(inst_item, dict):
                         inst_type = inst_item.get("type", "")
@@ -189,23 +192,65 @@ class OpenAIResponsesConverter:
                             content = inst_item.get("content", "")
                             if isinstance(content, list):
                                 converted = cls._convert_content_to_chat(content)
-                                messages.insert(0, {"role": role, "content": converted})
+                                if isinstance(converted, list):
+                                    inst_content_parts.extend(converted)
+                                else:
+                                    inst_text_parts.append(str(converted))
                             else:
-                                messages.insert(0, {"role": role, "content": str(content)})
+                                inst_text_parts.append(str(content))
                         elif inst_type == "input_text" or "text" in inst_item:
+                            text_val = inst_item.get("text", "")
+                            if text_val:
+                                inst_text_parts.append(text_val)
+                        elif inst_type == "input_image":
+                            image_url = inst_item.get("image_url", "")
+                            if image_url:
+                                inst_content_parts.append({
+                                    "type": "image_url",
+                                    "image_url": {"url": image_url}
+                                })
+                        elif inst_type == "input_file":
+                            file_data = inst_item.get("file_data", "")
+                            file_id = inst_item.get("file_id")
+                            filename = inst_item.get("filename", "")
+                            if file_data:
+                                file_obj = {"file_data": file_data}
+                                if filename:
+                                    file_obj["filename"] = filename
+                                inst_content_parts.append({"type": "file", "file": file_obj})
+                            elif file_id:
+                                file_obj = {"file_id": file_id}
+                                if filename:
+                                    file_obj["filename"] = filename
+                                inst_content_parts.append({"type": "file", "file": file_obj})
+                    elif isinstance(inst_item, str):
+                        inst_text_parts.append(inst_item)
+                # 合并 instructions 为单条或多条 developer 消息
+                if inst_content_parts or inst_text_parts:
+                    if inst_text_parts:
+                        text_block = {"type": "text", "text": "\n".join(inst_text_parts)}
+                        if inst_content_parts:
                             messages.insert(0, {
                                 "role": "developer",
-                                "content": inst_item.get("text", "")
+                                "content": [text_block] + inst_content_parts
                             })
-                    elif isinstance(inst_item, str):
-                        messages.insert(0, {"role": "developer", "content": inst_item})
+                        else:
+                            messages.insert(0, {
+                                "role": "developer",
+                                "content": "\n".join(inst_text_parts)
+                            })
+                    elif inst_content_parts:
+                        messages.insert(0, {
+                            "role": "developer",
+                            "content": inst_content_parts
+                        })
         
         # 3. 转换 tools
         tools = cls._convert_tools(request.get("tools", []))
         
         # 4. 构建 Chat 请求
         chat_request = {
-            "model": request.get("model", "gpt-4o"),
+            "model": request.get("model") or "gpt-4o",
             "messages": messages,
         }
         
@@ -445,10 +490,44 @@ class OpenAIResponsesConverter:
                 "content": "[Audio input]"
             }
         
+        elif item_type == "input_image":
+            image_url = item.get("image_url", "")
+            if image_url:
+                return {
+                    "role": "user",
+                    "content": [{
+                        "type": "image_url",
+                        "image_url": {"url": image_url}
+                    }]
+                }
+            return None
+        
+        elif item_type == "input_file":
+            file_data = item.get("file_data", "")
+            file_id = item.get("file_id")
+            filename = item.get("filename", "")
+            file_obj = {}
+            if file_data:
+                file_obj["file_data"] = file_data
+            elif file_id:
+                file_obj["file_id"] = file_id
+            if filename:
+                file_obj["filename"] = filename
+            if file_obj:
+                return {
+                    "role": "user",
+                    "content": [{"type": "file", "file": file_obj}]
+                }
+            return None
+        
         # 未知类型，尝试作为消息处理
         if "role" in item and "content" in item:
             role = cls.ROLE_MAP.get(item.get("role", ""), item.get("role", "user"))
-            return {"role": role, "content": str(item.get("content", ""))}
+            content = item.get("content", "")
+            if isinstance(content, list):
+                converted = cls._convert_content_to_chat(content)
+                return {"role": role, "content": converted}
+            return {"role": role, "content": str(content)}
         
         return None
 
@@ -855,10 +934,16 @@ class OpenAIResponsesConverter:
                             "arguments": tc.get("function", {}).get("arguments", "{}")
                         })
                 elif role == "tool":
+                    if isinstance(content, str):
+                        tool_output = content
+                    elif isinstance(content, list):
+                        tool_output = cls._convert_chat_content_to_responses(content)
+                    else:
+                        tool_output = str(content)
                     input_items.append({
                         "type": "function_call_output",
                         "call_id": msg.get("tool_call_id", ""),
-                        "output": content if isinstance(content, str) else str(content)
+                        "output": tool_output
                     })
                 elif isinstance(content, str):
                     # 处理 assistant 消息的 reasoning_content
@@ -934,7 +1019,7 @@ class OpenAIResponsesConverter:
         
         # 构建 Responses 请求
         responses_request = {
-            "model": request.get("model", "gpt-4o"),
+            "model": request.get("model") or "gpt-4o",
             "input": input_data,
         }
         
@@ -1161,7 +1246,7 @@ class OpenAIResponsesConverter:
         # 5. 构建 Anthropic 请求
         max_output_tokens = request.get("max_output_tokens")
         anthropic_request = {
-            "model": request.get("model", "claude-sonnet-4-20250514"),
+            "model": request.get("model") or "claude-sonnet-4-20250514",
             "max_tokens": max_output_tokens if max_output_tokens is not None else 4096,
             "messages": anthropic_messages,
         }

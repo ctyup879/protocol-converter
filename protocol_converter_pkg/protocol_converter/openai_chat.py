@@ -167,7 +167,7 @@ class OpenAIChatConverter:
     def _normalize_request(cls, request: Dict[str, Any]) -> ChatCompletionRequest:
         """标准化 OpenAI Chat 请求"""
         return ChatCompletionRequest(
-            model=request.get("model", "gpt-4o"),
+            model=request.get("model") or "gpt-4o",
             messages=request.get("messages", []),
             stream=request.get("stream", False),
             temperature=request.get("temperature"),

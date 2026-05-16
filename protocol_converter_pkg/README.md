@@ -489,14 +489,17 @@ pip install pytest pytest-asyncio httpx
 ### 执行单元测试
 
 ```bash
-# 运行全部 332 个单元测试
-python3 -m pytest tests/ -v
+# 1. 进入项目目录
+cd /root/repos/ai-proxy/protocol_converter_pkg
 
-# 运行带覆盖率的测试
-python3 -m pytest tests/ -v --cov=protocol_converter
+# 2. 运行全部 332 个单元测试
+python3 -m pytest tests/test_protocol_converter.py -v
 
-# 运行特定测试类
-python3 -m pytest tests/ -v -k "TestAnthropicThinkingWithText"
+# 3. 运行带覆盖率的测试
+python3 -m pytest tests/test_protocol_converter.py -v --cov=protocol_converter
+
+# 4. 运行特定测试类
+python3 -m pytest tests/test_protocol_converter.py -v -k "TestAnthropicThinkingWithText"
 ```
 
 ### 执行集成测试
@@ -504,21 +507,43 @@ python3 -m pytest tests/ -v -k "TestAnthropicThinkingWithText"
 集成测试需要配置有效的 API Key（位于 `examples/` 下的各测试文件中），支持以下后端：
 
 ```bash
-# 1. OpenAI Chat 后端集成测试（MiniMax API，8 项测试）
+# 1. 进入项目目录
 cd /root/repos/ai-proxy/protocol_converter_pkg
+
+# 2. OpenAI Chat 后端集成测试（MiniMax API，8 项测试）
 python3 examples/integration_test_chat_backend.py
 
-# 2. Anthropic 兼容后端集成测试（MiniMax API，7 项测试）
+# 3. Anthropic 兼容后端集成测试（MiniMax API，7 项测试）
 python3 examples/integration_test_anthropic_backend.py
 
-# 3. OpenAI Responses 后端集成测试（OpenRouter API，7 项测试）
+# 4. OpenAI Responses 后端集成测试（OpenRouter API，7 项测试）
 python3 examples/integration_test_responses_backend.py
 
-# 4. 3×3 全量 9 路集成测试（覆盖所有协议 × 后端组合）
+# 5. 3×3 全量 9 路集成测试（覆盖所有协议 × 后端组合）
 python3 examples/integration_test_all_9_paths.py
 ```
 
 > 集成测试自动检测 API 连接，如果 API Key 无效或网络不可达，仅 API 调用部分会跳过，协议检测和转换逻辑的验证仍然正常运行。
+
+### 测试验证清单
+
+| 测试类型 | 测试文件 | 测试数量 | 通过标准 |
+|---------|---------|---------|---------|
+| 单元测试 | `tests/test_protocol_converter.py` | 332 | 全部通过 |
+| Chat 后端集成测试 | `examples/integration_test_chat_backend.py` | 8 | 全部通过 |
+| Anthropic 后端集成测试 | `examples/integration_test_anthropic_backend.py` | 7 | 全部通过 |
+| Responses 后端集成测试 | `examples/integration_test_responses_backend.py` | 7 | 全部通过 |
+| 3×3 全量集成测试 | `examples/integration_test_all_9_paths.py` | 9 | 全部通过 |
+
+**核心依赖说明：**
+
+| 依赖 | 版本要求 | 用途 | 是否必需 |
+|------|---------|------|---------|
+| Python | ≥ 3.9 | 运行时 | 必需 |
+| httpx | ≥ 0.25.0 | HTTP 客户端（用于转发请求） | 可选 |
+| pytest | ≥ 7.0.0 | 单元测试框架 | 开发必需 |
+| pytest-asyncio | ≥ 0.21.0 | 异步测试支持 | 开发必需 |
+| pytest-cov | ≥ 4.0.0 | 测试覆盖率 | 开发可选 |
 
 ## 参考
 
@@ -529,6 +554,40 @@ python3 examples/integration_test_all_9_paths.py
 - [anthropic-sdk-python](https://github.com/anthropics/anthropic-sdk-python)
 
 ## 更新日志
+
+### v1.18.0
+
+基于官方文档、Context7 实时检索和 Python SDK（`openai-python` v2.11、`anthropic-sdk-python`）进行3轮深度审查后修复协议转换缺陷：
+
+**第1轮 — 协议解析与字段映射逻辑缺陷：**
+
+- **`protocol_detector` model 为 None 时崩溃修复**：`request.get("model")` 可能返回 `None`，直接调用 `.startswith()` 会抛出 `AttributeError`。现统一添加 `isinstance(model, str)` 校验后再调用字符串方法
+- **`engine._anthropic_to_chat_response` 多个 text 块合并修复**：Anthropic 响应含多个 `text` 内容块时，后一个块会覆盖前一个块的内容，导致文本丢失。现改为追加合并，citations 同样追加
+- **`engine._chat_to_anthropic_request` assistant 多模态内容块支持补全**：assistant 消息 content 为列表时，之前仅处理 `type="text"` 块，`image_url`/`file` 等多模态块被静默丢弃。现补充 image_url → Anthropic `image` 块、file → Anthropic `document` 块的映射
+- **`openai_responses.from_openai_chat_request` tool 消息列表 content 结构保留修复**：Chat `tool` 消息 `content` 为列表（多模态工具结果）时，之前使用 `str(content)` 转为字符串，丢失结构。现调用 `_convert_chat_content_to_responses` 正确转换为 Responses 内容块列表
+- **`anthropic.to_openai_chat` metadata 非字典容错修复**：`request.get("metadata")` 返回非字典值时，直接调用 `.get("user_id")` 会抛出 `AttributeError`。现添加 `isinstance(metadata, dict)` 校验
+- **`anthropic.to_openai_responses` / `openai_responses.from_openai_chat` `created_at` 类型修复**：`time.time()` 返回浮点数，不符合 Responses API 整数时间戳规范。现统一使用 `int(time.time())`
+- **`openai_responses.to_openai_chat` instructions 列表多模态支持**：instructions 数组中的 `input_image`/`input_file` 类型项之前被静默忽略。现正确转换为 Chat `image_url`/`file` 内容块，合并为单条 developer 消息
+- **`openai_responses._convert_input_item_to_message` input_image/input_file 支持**：Responses `input` 数组中的独立 `input_image`/`input_file` 项之前返回 `None` 被丢弃。现正确转换为 Chat 多模态内容块
+
+**第2轮 — 异常处理遗漏与边界条件漏洞：**
+
+- **`engine._handle_stream_response` SSE 解析健壮性修复**：之前使用 `response.content` 迭代原始字节块，若服务器一次发送多行 SSE，解析会出错（event 与 data 混杂）。现优先使用 `response.aiter_lines()` 正确按行解析，兼容非 httpx 客户端回退到原逻辑
+- **`anthropic.from_openai_chat` 响应含 error 字段处理**：Chat 响应若包含顶层 `error` 字段（如后端报错），之前 `stop_reason` 仍映射为 `"end_turn"`。现正确映射为 `"refusal"` 并填充 `stop_details`
+- **`engine._chat_to_anthropic_request` system 消息非字典块降级修复**：system/developer 消息 `content` 为列表时，若元素为非字典类型（如字符串列表），之前被 `continue` 跳过导致内容丢失。现降级为字符串追加到 system_parts
+- **全模块 `model=None` 边界统一修复**：所有 `request.get("model", default)` 在 `model` 显式为 `None` 时不会使用默认值。现统一改为 `request.get("model") or default`，确保 None 时回退到默认模型
+- **`engine._chat_to_anthropic_request` 空 assistant 消息保留**：assistant 消息 `content=None` 且无 `tool_calls` 时，之前不生成任何消息导致消息序列断裂。现生成空 `content: []` 的 assistant 消息保持序列完整
+
+**第3轮 — 数据类型转换校验及交叉复查：**
+
+- **`openai_responses._convert_input_item_to_message` fallback 逻辑增强**：未知类型输入项的 fallback 不再仅检查 `"role" in item and "content" in item`，而是同时支持 `content` 为列表时的 `_convert_content_to_chat` 转换
+- **`openai_responses.to_openai_chat` instructions message 类型 `text` 字段兼容**：message 类型的 instructions 项若使用 `text` 字段（非标准但可能出现），之前因只读取 `content` 而丢失文本。现已在重构后的 instructions 合并逻辑中覆盖
+- **交叉复查验证**：逐文件检查所有 `request.get(...)` 的默认值逻辑、所有 `isinstance(...)` 的类型守卫、所有 `.startswith()` 的前置类型校验，确保边界条件全覆盖
+
+**测试覆盖：**
+
+- 全部 332 个单元测试通过
+- 4 项集成测试全部通过（Chat 后端、Anthropic 后端、Responses 后端、3×3 全量 9 路）
 
 ### v1.17.0
 

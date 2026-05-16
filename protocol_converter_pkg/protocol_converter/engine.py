@@ -269,16 +269,27 @@ class ProtocolConverterEngine:
                         system_parts.append(content)
                 elif isinstance(content, list):
                     for block in content:
-                        if isinstance(block, dict) and block.get("type") == "text":
-                            text = block.get("text", "")
-                            if block.get("cache_control"):
-                                # 保留含 cache_control 的块为 Anthropic TextBlockParam 格式
-                                has_system_cache_control = True
-                                tb = {"type": "text", "text": text}
-                                if isinstance(block["cache_control"], dict):
-                                    tb["cache_control"] = block["cache_control"]
-                                system_blocks.append(tb)
+                        if isinstance(block, dict):
+                            if block.get("type") == "text":
+                                text = block.get("text", "")
+                                if block.get("cache_control"):
+                                    # 保留含 cache_control 的块为 Anthropic TextBlockParam 格式
+                                    has_system_cache_control = True
+                                    tb = {"type": "text", "text": text}
+                                    if isinstance(block["cache_control"], dict):
+                                        tb["cache_control"] = block["cache_control"]
+                                    system_blocks.append(tb)
+                                else:
+                                    system_parts.append(text)
                             else:
+                                # 其他类型降级为文本
+                                text = block.get("text", "")
+                                if text:
+                                    system_parts.append(text)
+                        else:
+                            # 非字典块降级为字符串
+                            text = str(block) if block is not None else ""
+                            if text:
                                 system_parts.append(text)
                 continue
             
@@ -342,12 +353,61 @@ class ProtocolConverterEngine:
                         assistant_content.append({"type": "text", "text": content})
                     elif isinstance(content, list):
                         for b in content:
-                            if isinstance(b, dict) and b.get("type") == "text":
+                            if not isinstance(b, dict):
+                                continue
+                            b_type = b.get("type", "")
+                            if b_type == "text":
                                 text_block = {"type": "text", "text": b.get("text", "")}
                                 # 保留 annotations -> citations 映射
                                 if b.get("annotations"):
                                     text_block["citations"] = b["annotations"]
                                 assistant_content.append(text_block)
+                            elif b_type == "image_url":
+                                # Chat image_url -> Anthropic image 块
+                                url = b.get("image_url", {})
+                                if isinstance(url, dict):
+                                    url_str = url.get("url", "")
+                                    if url_str.startswith("data:"):
+                                        parts = url_str.split(";", 1)
+                                        media_type = parts[0].replace("data:", "") if len(parts) > 1 else "image/png"
+                                        data = parts[1].replace("base64,", "") if len(parts) > 1 else ""
+                                        assistant_content.append({
+                                            "type": "image",
+                                            "source": {"type": "base64", "media_type": media_type, "data": data}
+                                        })
+                                    else:
+                                        assistant_content.append({
+                                            "type": "image",
+                                            "source": {"type": "url", "url": url_str}
+                                        })
+                            elif b_type == "file":
+                                file_data = b.get("file", {})
+                                file_url = file_data.get("file_data", "")
+                                mime_type = file_data.get("mime_type", "application/octet-stream")
+                                if file_url:
+                                    if file_url.startswith("data:"):
+                                        parts = file_url.split(";", 1)
+                                        media_type = parts[0].replace("data:", "") if len(parts) > 1 else mime_type
+                                        data = parts[1].replace("base64,", "") if len(parts) > 1 else ""
+                                        assistant_content.append({
+                                            "type": "document",
+                                            "source": {"type": "base64", "media_type": media_type, "data": data}
+                                        })
+                                    elif file_url.startswith("http"):
+                                        assistant_content.append({
+                                            "type": "document",
+                                            "source": {"type": "url", "url": file_url}
+                                        })
+                                    else:
+                                        assistant_content.append({
+                                            "type": "document",
+                                            "source": {"type": "base64", "media_type": mime_type, "data": file_url}
+                                        })
+                            else:
+                                # 未知类型降级为文本
+                                text = b.get("text", "")
+                                if text:
+                                    assistant_content.append({"type": "text", "text": text})
                 
                 # 处理 reasoning_content -> thinking 块
                 # Anthropic SDK: ThinkingBlock 必须包含 thinking + signature 字段
@@ -380,6 +440,12 @@ class ProtocolConverterEngine:
                     anthropic_messages.append({
                         "role": "assistant",
                         "content": assistant_content
+                    })
+                else:
+                    # 无内容块但角色为 assistant，保留空消息以维持消息序列
+                    anthropic_messages.append({
+                        "role": "assistant",
+                        "content": []
                     })
                 continue
             
@@ -455,7 +521,7 @@ class ProtocolConverterEngine:
         
         # 构建 Anthropic 请求
         anthropic_request = {
-            "model": request.get("model", "claude-sonnet-4-20250514"),
+            "model": request.get("model") or "claude-sonnet-4-20250514",
             "max_tokens": request.get("max_completion_tokens") if request.get("max_completion_tokens") is not None else request.get("max_tokens", 4096),
             "messages": anthropic_messages,
         }
@@ -735,7 +801,12 @@ class ProtocolConverterEngine:
         
         for block in content:
             if block.get("type") == "text":
-                message_content = block.get("text", "")
+                text_val = block.get("text", "")
+                # 合并多个 text 块的内容，避免后覆盖前
+                if message_content is None:
+                    message_content = text_val
+                else:
+                    message_content = f"{message_content}\n{text_val}"
                 # 保留 citations -> Chat annotations（多个 text 块的 citations 合并）
                 if block.get("citations"):
                     if message_annotations is None:
@@ -1052,8 +1123,13 @@ class ProtocolConverterEngine:
         # 需要缓存 event type 直到收到对应的 data
         pending_event_type = None
         
-        async for line in response.content:
-            line = line.decode("utf-8").strip()
+        # 使用 aiter_lines() 正确解析 SSE 行（避免原始字节块包含多行导致解析错误）
+        line_iter = response.aiter_lines() if hasattr(response, "aiter_lines") else response.content
+        async for line in line_iter:
+            if hasattr(response, "aiter_lines"):
+                line = line.strip()
+            else:
+                line = line.decode("utf-8").strip()
             if not line or line.startswith(":"):
                 continue
             
