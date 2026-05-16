@@ -528,6 +528,18 @@ class AnthropicConverter:
                     assistant_msg["content"] = None
                 if tool_calls:
                     assistant_msg["tool_calls"] = tool_calls
+                # 如果 assistant 消息只含 thinking/redacted_thinking 块（无文本无工具），
+                # 将 thinking 内容作为 reasoning_content 保留（OpenAI o系列格式）
+                if assistant_msg["content"] is None and not tool_calls:
+                    thinking_texts = []
+                    for block in content if isinstance(content, list) else []:
+                        if isinstance(block, dict):
+                            if block.get("type") == "thinking":
+                                t = block.get("thinking", "")
+                                if t:
+                                    thinking_texts.append(t)
+                    if thinking_texts:
+                        assistant_msg["reasoning_content"] = "\n".join(thinking_texts)
                 result.append(assistant_msg)
             
             # 构建 user 消息
@@ -738,14 +750,14 @@ class AnthropicConverter:
             
             # 获取停止原因
             finish_reason = choice.get("finish_reason")
-            if finish_reason:
-                stop_reason = cls.STOP_REASON_MAP.get(finish_reason, "end_turn")
             
-            # 处理 refusal 内容
+            # 处理 refusal 内容（refusal 优先于 finish_reason）
             refusal = message.get("refusal")
             if refusal:
                 stop_reason = "refusal"
                 stop_details = {"reason": "content_policy", "message": refusal}
+            elif finish_reason:
+                stop_reason = cls.STOP_REASON_MAP.get(finish_reason, "end_turn")
         
         # 如果没有任何内容块，添加空文本
         if not content_blocks:
@@ -1429,6 +1441,9 @@ class AnthropicConverter:
         elif stop_reason == "pause_turn":
             status = "incomplete"
             incomplete_details = {"reason": "max_output_tokens"}
+        elif stop_reason == "stop_sequence":
+            # stop_sequence 在 Responses API 中无直接等价，映射为 completed
+            pass
         
         usage = response.get("usage", {})
         
@@ -1462,6 +1477,10 @@ class AnthropicConverter:
         
         if incomplete_details:
             result["incomplete_details"] = incomplete_details
+        
+        # 保留 container 字段（Anthropic 响应可能包含此字段）
+        if response.get("container"):
+            result["container"] = response["container"]
         
         return result
 

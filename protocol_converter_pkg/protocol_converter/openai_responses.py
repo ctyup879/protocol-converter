@@ -388,10 +388,11 @@ class OpenAIResponsesConverter:
         
         elif item_type == "function_call_output":
             # 工具调用结果 -> role=tool
+            output_val = item.get("output", "")
             return {
                 "role": "tool",
                 "tool_call_id": item.get("call_id", ""),
-                "content": cls._convert_tool_output_to_chat_content(item.get("output", ""))
+                "content": cls._convert_tool_output_to_chat_content(output_val)
             }
         
         elif item_type == "function_call":
@@ -577,7 +578,7 @@ class OpenAIResponsesConverter:
                     content_parts.append({"type": "text", "text": str(text)})
         
         if has_multimodal:
-            return content_parts if content_parts else "\n".join(text_parts)
+            return content_parts if content_parts else [{"type": "text", "text": "\n".join(text_parts)}] if text_parts else []
         elif text_parts:
             return "\n".join(text_parts)
         return ""
@@ -813,12 +814,28 @@ class OpenAIResponsesConverter:
                 
                 if role == "assistant" and msg.get("tool_calls"):
                     # assistant + tool_calls -> function_call items
-                    if content:
+                    # 处理 reasoning_content -> reasoning 输入项
+                    reasoning_content = msg.get("reasoning_content")
+                    if reasoning_content:
                         input_items.append({
-                            "type": "message",
-                            "role": "assistant",
-                            "content": [{"type": "output_text", "text": content}]
+                            "type": "reasoning",
+                            "id": f"rs_{uuid.uuid4().hex[:24]}",
+                            "summary": [{"type": "summary_text", "text": reasoning_content}]
                         })
+                    if content:
+                        if isinstance(content, str):
+                            input_items.append({
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [{"type": "output_text", "text": content}]
+                            })
+                        elif isinstance(content, list):
+                            content_items = cls._convert_chat_content_to_responses(content)
+                            input_items.append({
+                                "type": "message",
+                                "role": "assistant",
+                                "content": content_items
+                            })
                     for tc in msg["tool_calls"]:
                         input_items.append({
                             "type": "function_call",
@@ -833,6 +850,13 @@ class OpenAIResponsesConverter:
                         "output": content if isinstance(content, str) else str(content)
                     })
                 elif isinstance(content, str):
+                    # 处理 assistant 消息的 reasoning_content
+                    if role == "assistant" and msg.get("reasoning_content"):
+                        input_items.append({
+                            "type": "reasoning",
+                            "id": f"rs_{uuid.uuid4().hex[:24]}",
+                            "summary": [{"type": "summary_text", "text": msg["reasoning_content"]}]
+                        })
                     input_items.append({
                         "type": "message",
                         "role": role,
@@ -1110,6 +1134,15 @@ class OpenAIResponsesConverter:
                 # 无显式 tool_choice 或 tool_choice="none"
                 anthropic_request["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": True}
         
+        # 5.6 处理 stop 参数 → Anthropic stop_sequences
+        # Responses API 没有 stop 顶层参数，但可能从 Chat 转换时保留在 extra_body.stop 中
+        stop_val = request.get("stop")
+        if stop_val:
+            if isinstance(stop_val, list):
+                anthropic_request["stop_sequences"] = stop_val
+            else:
+                anthropic_request["stop_sequences"] = [stop_val]
+        
         # 6. reasoning -> thinking
         reasoning = request.get("reasoning")
         if reasoning and isinstance(reasoning, dict):
@@ -1218,8 +1251,7 @@ class OpenAIResponsesConverter:
             extra["logit_bias"] = request["logit_bias"]
         if request.get("seed") is not None:
             extra["seed"] = request["seed"]
-        if request.get("stop"):
-            extra["stop"] = request["stop"]
+        # stop 已在上面映射为 stop_sequences，不再放入 extra_body
         if extra:
             if "extra_body" not in anthropic_request:
                 anthropic_request["extra_body"] = {}
@@ -1635,7 +1667,6 @@ class OpenAIResponsesConverter:
             "object": "response",
             "status": status,
             "created_at": response.get("created", int(time.time())),
-            "completed_at": int(time.time()) if status == "completed" else None,
             "model": response.get("model", ""),
             "output": output,
             "usage": response_usage,
@@ -1644,6 +1675,10 @@ class OpenAIResponsesConverter:
             "metadata": response.get("metadata"),
             "parallel_tool_calls": True,  # Chat API 默认允许并行工具调用
         }
+        
+        # 仅在 status 为 completed 时设置 completed_at
+        if status == "completed":
+            result["completed_at"] = int(time.time())
         
         # 添加可选字段（如果 Chat 响应中存在）
         if response.get("service_tier"):
@@ -1713,11 +1748,15 @@ class OpenAIResponsesConverter:
                     if isinstance(c, dict):
                         c_type = c.get("type", "")
                         if c_type == "reasoning_text":
-                            reasoning_texts.append(c.get("text", ""))
+                            t = c.get("text", "")
+                            if t:
+                                reasoning_texts.append(t)
                         elif c_type == "summary_text":
-                            # Responses SDK: reasoning 项 summary 字段中的摘要文本
+                            # Responses SDK: reasoning 项 content 中的摘要文本
                             # 也应纳入 reasoning_content 以保留推理信息
-                            reasoning_texts.append(c.get("text", ""))
+                            t = c.get("text", "")
+                            if t:
+                                reasoning_texts.append(t)
                 # 处理 summary 字段 (Responses API: summary 是必填字段)
                 for s in item.get("summary", []):
                     if isinstance(s, dict) and s.get("type") == "summary_text":
@@ -2495,3 +2534,165 @@ class OpenAIResponsesConverter:
             return events
         
         return [{"type": "response.ping"}]
+    
+    # ================================================================
+    # Responses 事件 -> Chat 流式块 (用于 Responses 后端流式转换)
+    # ================================================================
+
+    @classmethod
+    def _convert_responses_event_to_chat_chunk(cls, event_type: str, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        将 Responses SSE 事件转换为 OpenAI Chat 流式块
+        
+        用于 Responses 后端流式响应 → Chat/Anthropic 目标协议的转换场景。
+        
+        Args:
+            event_type: Responses SSE 事件类型
+            data: 事件数据
+            
+        Returns:
+            Optional[Dict]: OpenAI Chat 格式的流式块，如果事件不需要转换则返回 None
+        """
+        if event_type == "response.output_text.delta":
+            # 文本增量
+            return {
+                "id": data.get("response", {}).get("id", ""),
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": data.get("response", {}).get("model", ""),
+                "choices": [{
+                    "index": 0,
+                    "delta": {"content": data.get("delta", "")},
+                    "finish_reason": None
+                }]
+            }
+        
+        elif event_type == "response.output_text.done":
+            # 文本完成 - 不需要单独的 Chat 块
+            return None
+        
+        elif event_type == "response.function_call_arguments.delta":
+            # 函数调用参数增量
+            tc_index = data.get("output_index", 0)
+            return {
+                "id": data.get("response", {}).get("id", ""),
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": data.get("response", {}).get("model", ""),
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": tc_index,
+                            "function": {"arguments": data.get("delta", "")}
+                        }]
+                    },
+                    "finish_reason": None
+                }]
+            }
+        
+        elif event_type == "response.output_item.added":
+            # 输出项添加
+            item = data.get("item", {})
+            item_type = item.get("type", "")
+            
+            if item_type == "message":
+                # 消息项开始 - 发送 role delta
+                return {
+                    "id": data.get("response", {}).get("id", ""),
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": data.get("response", {}).get("model", ""),
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": ""},
+                        "finish_reason": None
+                    }]
+                }
+            elif item_type == "function_call":
+                # 函数调用开始
+                return {
+                    "id": data.get("response", {}).get("id", ""),
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": data.get("response", {}).get("model", ""),
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [{
+                                "index": data.get("output_index", 0),
+                                "id": item.get("id", item.get("call_id", "")),
+                                "type": "function",
+                                "function": {
+                                    "name": item.get("name", ""),
+                                    "arguments": ""
+                                }
+                            }]
+                        },
+                        "finish_reason": None
+                    }]
+                }
+            elif item_type == "reasoning":
+                # 推理项开始 - 不需要单独的 Chat 块
+                # 推理内容通过 response.reasoning_text.delta 事件发送
+                return {
+                    "id": data.get("response", {}).get("id", ""),
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": data.get("response", {}).get("model", ""),
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": ""},
+                        "finish_reason": None
+                    }]
+                }
+        
+        elif event_type == "response.reasoning_text.delta":
+            # 推理文本增量
+            return {
+                "id": data.get("response", {}).get("id", ""),
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": data.get("response", {}).get("model", ""),
+                "choices": [{
+                    "index": 0,
+                    "delta": {"reasoning_content": data.get("delta", "")},
+                    "finish_reason": None
+                }]
+            }
+        
+        elif event_type in ("response.completed", "response.failed", "response.incomplete"):
+            # 响应完成/失败/不完整
+            resp_data = data.get("response", {})
+            status = resp_data.get("status", "completed")
+            finish_reason = "stop"
+            if status == "incomplete":
+                details = resp_data.get("incomplete_details", {})
+                reason = details.get("reason", "") if details else ""
+                if reason == "max_output_tokens":
+                    finish_reason = "length"
+                elif reason == "content_filter":
+                    finish_reason = "content_filter"
+            elif status == "failed":
+                finish_reason = "stop"
+            
+            usage = resp_data.get("usage", {})
+            chunk = {
+                "id": resp_data.get("id", ""),
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": resp_data.get("model", ""),
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": finish_reason
+                }],
+                "usage": {
+                    "prompt_tokens": usage.get("input_tokens", 0),
+                    "completion_tokens": usage.get("output_tokens", 0),
+                    "total_tokens": usage.get("total_tokens", 0),
+                }
+            }
+            return chunk
+        
+        return None

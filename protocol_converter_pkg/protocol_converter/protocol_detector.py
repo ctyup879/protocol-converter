@@ -42,7 +42,8 @@ class ProtocolDetector:
     # Anthropic Messages API 特征
     ANTHROPIC_KEYS = {"messages", "model", "max_tokens"}
     ANTHROPIC_ROLES = {"user", "assistant"}
-    ANTHROPIC_CONTENT_TYPES = {"text", "tool_use", "tool_result", "thinking", "redacted_thinking", 
+    # Anthropic 特有内容类型（排除 "text" 以避免误判，Chat API 也使用 type=text）
+    ANTHROPIC_CONTENT_TYPES = {"tool_use", "tool_result", "thinking", "redacted_thinking", 
                                "image", "document", "search_result", "server_tool_use",
                                "web_search_tool_result", "web_fetch_tool_result",
                                "code_execution_tool_result", "bash_code_execution_tool_result",

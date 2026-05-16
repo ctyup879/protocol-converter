@@ -5257,3 +5257,561 @@ class TestChatToAnthropicReasoningSummaryToDisplay:
         result = engine.convert_request(request)
         assert result["thinking"]["type"] == "enabled"
         assert result["thinking"]["display"] == "summarized"
+
+
+class TestChatToAnthropicRoundTripParams:
+    """测试 Chat→Anthropic 路径恢复 Anthropic 特有参数（round-trip 场景）"""
+
+    def test_top_k_recovery(self):
+        """从 Chat 请求中恢复 top_k 参数"""
+        request = {
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "top_k": 50,
+        }
+        config = ConverterConfig(backend_type="anthropic")
+        engine = ProtocolConverterEngine(config)
+        result = engine.convert_request(request)
+        assert result["top_k"] == 50
+
+    def test_container_recovery(self):
+        """从 Chat 请求中恢复 container 参数"""
+        request = {
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "container": "ctr_abc123",
+        }
+        config = ConverterConfig(backend_type="anthropic")
+        engine = ProtocolConverterEngine(config)
+        result = engine.convert_request(request)
+        assert result["container"] == "ctr_abc123"
+
+    def test_cache_control_recovery(self):
+        """从 Chat 请求中恢复 cache_control 参数"""
+        request = {
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "cache_control": {"type": "ephemeral"},
+        }
+        config = ConverterConfig(backend_type="anthropic")
+        engine = ProtocolConverterEngine(config)
+        result = engine.convert_request(request)
+        assert result["cache_control"] == {"type": "ephemeral"}
+
+    def test_output_config_recovery(self):
+        """从 Chat 请求中恢复 output_config 参数"""
+        request = {
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "output_config": {"key": "value"},
+        }
+        config = ConverterConfig(backend_type="anthropic")
+        engine = ProtocolConverterEngine(config)
+        result = engine.convert_request(request)
+        assert result["output_config"] == {"key": "value"}
+
+    def test_anthropic_server_tools_recovery(self):
+        """从 Chat 请求中恢复 Anthropic 服务器工具"""
+        request = {
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Search"}],
+            "tools": [{"type": "function", "function": {"name": "my_tool", "parameters": {}}}],
+            "anthropic_server_tools": [{"type": "web_search_20250305", "name": "web_search"}],
+        }
+        config = ConverterConfig(backend_type="anthropic")
+        engine = ProtocolConverterEngine(config)
+        result = engine.convert_request(request)
+        # Chat function 工具转换为 Anthropic 格式 (无 type 字段)，服务器工具保留 type
+        tool_names = [t.get("name", t.get("type", "")) for t in result.get("tools", [])]
+        assert "web_search" in tool_names or "web_search_20250305" in tool_names
+        assert "my_tool" in tool_names
+
+    def test_anthropic_server_tools_no_duplicate(self):
+        """Anthropic 服务器工具不重复添加"""
+        request = {
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Search"}],
+            "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+            "anthropic_server_tools": [{"type": "web_search_20250305", "name": "web_search"}],
+        }
+        config = ConverterConfig(backend_type="anthropic")
+        engine = ProtocolConverterEngine(config)
+        result = engine.convert_request(request)
+        web_search_count = sum(1 for t in result.get("tools", []) if t.get("type") == "web_search_20250305")
+        assert web_search_count == 1
+
+    def test_full_anthropic_round_trip_params(self):
+        """完整 Anthropic→Chat→Anthropic 往返转换保留特有参数"""
+        anthropic_request = {
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "top_k": 40,
+            "container": "ctr_test",
+            "cache_control": {"type": "ephemeral"},
+            "output_config": {"key": "val"},
+            "thinking": {"type": "enabled", "budget_tokens": 10000},
+        }
+        # Anthropic → Chat
+        chat_request = AnthropicConverter.to_openai_chat(anthropic_request)
+        assert chat_request["extra_body"]["top_k"] == 40
+        assert chat_request["extra_body"]["container"] == "ctr_test"
+
+        # Chat → Anthropic (通过 engine)
+        config = ConverterConfig(backend_type="anthropic")
+        engine = ProtocolConverterEngine(config)
+        # 合并 extra_body 到顶层（模拟 engine.convert_request 的行为）
+        merged = dict(chat_request)
+        extra = merged.pop("extra_body", {})
+        if isinstance(extra, dict):
+            for k, v in extra.items():
+                if k not in merged:
+                    merged[k] = v
+        result = engine._chat_to_anthropic_request(merged)
+        assert result["top_k"] == 40
+        assert result["container"] == "ctr_test"
+        assert result["cache_control"] == {"type": "ephemeral"}
+        assert result["output_config"] == {"key": "val"}
+
+
+class TestResponsesToAnthropicStopMapping:
+    """测试 Responses→Anthropic 路径 stop→stop_sequences 映射"""
+
+    def test_stop_string_to_stop_sequences(self):
+        """Responses stop 字符串参数应映射为 Anthropic stop_sequences 列表"""
+        request = {
+            "model": "gpt-4o",
+            "input": "Hello",
+            "stop": "END",
+        }
+        result = OpenAIResponsesConverter.to_anthropic_request(request)
+        assert result["stop_sequences"] == ["END"]
+
+    def test_stop_list_to_stop_sequences(self):
+        """Responses stop 列表参数应映射为 Anthropic stop_sequences"""
+        request = {
+            "model": "gpt-4o",
+            "input": "Hello",
+            "stop": ["END", "STOP"],
+        }
+        result = OpenAIResponsesConverter.to_anthropic_request(request)
+        assert result["stop_sequences"] == ["END", "STOP"]
+
+    def test_no_stop_no_stop_sequences(self):
+        """无 stop 参数时不应有 stop_sequences"""
+        request = {
+            "model": "gpt-4o",
+            "input": "Hello",
+        }
+        result = OpenAIResponsesConverter.to_anthropic_request(request)
+        assert "stop_sequences" not in result
+
+
+class TestAssistantThinkingOnlyBlock:
+    """测试 assistant 消息只含 thinking 块时的转换"""
+
+    def test_assistant_thinking_only_to_chat(self):
+        """assistant 消息只含 thinking 块时应保留 reasoning_content"""
+        msg = {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "Let me analyze this...", "signature": "sig_abc"},
+            ]
+        }
+        result = AnthropicConverter._convert_message(msg)
+        assert len(result) == 1
+        assert result[0]["role"] == "assistant"
+        assert result[0]["reasoning_content"] == "Let me analyze this..."
+
+    def test_assistant_thinking_and_text(self):
+        """assistant 消息含 thinking + text 块时 reasoning_content 不重复"""
+        msg = {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "Thinking...", "signature": "sig_abc"},
+                {"type": "text", "text": "Answer"},
+            ]
+        }
+        result = AnthropicConverter._convert_message(msg)
+        assert len(result) == 1
+        assert result[0]["role"] == "assistant"
+        assert result[0]["content"] == "Answer"
+        # thinking 块被跳过，text 内容正常
+        assert "reasoning_content" not in result[0]
+
+    def test_assistant_redacted_thinking_only(self):
+        """assistant 消息只含 redacted_thinking 块时 content 为 None"""
+        msg = {
+            "role": "assistant",
+            "content": [
+                {"type": "redacted_thinking", "data": "encrypted_data"},
+            ]
+        }
+        result = AnthropicConverter._convert_message(msg)
+        assert len(result) == 1
+        assert result[0]["role"] == "assistant"
+        assert result[0]["content"] is None
+
+
+# ============================================================
+# 本次修复缺陷的回归测试
+# ============================================================
+
+class TestProtocolDetectorNoFalsePositive:
+    """修复: ANTHROPIC_CONTENT_TYPES 中移除 "text" 避免误判"""
+
+    def test_chat_with_text_content_not_anthropic(self):
+        """Chat 消息含 type=text 内容块不应被误判为 Anthropic"""
+        request = {
+            "model": "gpt-4o",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Hello"}
+                    ]
+                }
+            ]
+        }
+        assert ProtocolDetector.detect(request) == Protocol.OPENAI_CHAT
+
+    def test_anthropic_with_tool_use_content_still_detected(self):
+        """含 tool_use 内容块的请求仍应被检测为 Anthropic"""
+        request = {
+            "model": "my-model",
+            "max_tokens": 1024,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "toolu_1", "content": "result"}
+                    ]
+                }
+            ]
+        }
+        assert ProtocolDetector.detect(request) == Protocol.ANTHROPIC
+
+
+class TestRefusalStopReasonPriority:
+    """修复: refusal 停止原因优先于 finish_reason"""
+
+    def test_refusal_overrides_finish_reason(self):
+        """当有 refusal 时，stop_reason 应为 refusal 而非 finish_reason 映射值"""
+        chat_response = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{
+                "message": {"content": "I can't help.", "refusal": "Policy violation"},
+                "finish_reason": "stop"
+            }]
+        }
+        result = AnthropicConverter.from_openai_chat(chat_response)
+        assert result["stop_reason"] == "refusal"
+        assert result["stop_details"]["reason"] == "content_policy"
+        assert result["stop_details"]["message"] == "Policy violation"
+
+    def test_no_refusal_uses_finish_reason(self):
+        """无 refusal 时使用 finish_reason 映射"""
+        chat_response = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{
+                "message": {"content": "Hello!"},
+                "finish_reason": "length"
+            }]
+        }
+        result = AnthropicConverter.from_openai_chat(chat_response)
+        assert result["stop_reason"] == "max_tokens"
+
+
+class TestAnthropicToResponsesContainer:
+    """修复: to_openai_responses 保留 container 字段"""
+
+    def test_container_preserved(self):
+        """Anthropic 响应中的 container 字段应保留"""
+        anthropic_response = {
+            "id": "msg_123",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Hello"}],
+            "model": "claude-sonnet-4-20250514",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+            "container": "ctr_abc123"
+        }
+        result = AnthropicConverter.to_openai_responses(anthropic_response)
+        assert result.get("container") == "ctr_abc123"
+
+    def test_no_container_when_absent(self):
+        """无 container 字段时结果中不应包含"""
+        anthropic_response = {
+            "id": "msg_123",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Hello"}],
+            "model": "claude-sonnet-4-20250514",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        }
+        result = AnthropicConverter.to_openai_responses(anthropic_response)
+        assert "container" not in result
+
+
+class TestAnthropicStopSequenceMapping:
+    """修复: stop_sequence 停止原因在 Responses 中映射为 completed"""
+
+    def test_stop_sequence_in_responses(self):
+        """Anthropic stop_sequence 映射为 Responses completed 状态"""
+        anthropic_response = {
+            "id": "msg_123",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Hello"}],
+            "model": "claude-sonnet-4-20250514",
+            "stop_reason": "stop_sequence",
+            "stop_sequence": "END",
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        }
+        result = AnthropicConverter.to_openai_responses(anthropic_response)
+        assert result["status"] == "completed"
+        assert result.get("incomplete_details") is None
+
+
+class TestResponsesCompletedAtField:
+    """修复: from_openai_chat 仅在 completed 时设置 completed_at"""
+
+    def test_completed_has_completed_at(self):
+        """completed 状态的响应应包含 completed_at"""
+        chat_response = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{
+                "message": {"content": "Hello!"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        }
+        result = OpenAIResponsesConverter.from_openai_chat(chat_response)
+        assert result["status"] == "completed"
+        assert "completed_at" in result
+
+    def test_incomplete_no_completed_at(self):
+        """incomplete 状态的响应不应包含 completed_at"""
+        chat_response = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{
+                "message": {"content": "Hello..."},
+                "finish_reason": "length"
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        }
+        result = OpenAIResponsesConverter.from_openai_chat(chat_response)
+        assert result["status"] == "incomplete"
+        assert "completed_at" not in result
+
+
+class TestResponsesAssistantMultimodalContent:
+    """修复: from_openai_chat_request 中 assistant+tool_calls 的 content 为列表时正确转换"""
+
+    def test_assistant_tool_calls_with_list_content(self):
+        """assistant+tool_calls 的 content 为列表时应正确转换"""
+        chat_request = {
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "user", "content": "Search for X"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "Let me search"},
+                    ],
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "search", "arguments": "{}"}
+                    }]
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "Result"}
+            ]
+        }
+        result = OpenAIResponsesConverter.from_openai_chat_request(chat_request)
+        assert isinstance(result["input"], list)
+        # 应包含 assistant 消息、function_call 和 function_call_output
+        types = [item.get("type") for item in result["input"]]
+        assert "message" in types
+        assert "function_call" in types
+        assert "function_call_output" in types
+
+
+class TestResponsesReasoningContentInInput:
+    """修复: Chat 请求中 assistant 消息的 reasoning_content 转换为 Responses reasoning 输入项"""
+
+    def test_reasoning_content_in_assistant_message(self):
+        """assistant 消息中的 reasoning_content 应转为 reasoning 输入项"""
+        chat_request = {
+            "model": "o3",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "The answer is 42.",
+                    "reasoning_content": "Let me think about this..."
+                }
+            ]
+        }
+        result = OpenAIResponsesConverter.from_openai_chat_request(chat_request)
+        assert isinstance(result["input"], list)
+        # 应包含 reasoning 项
+        reasoning_items = [item for item in result["input"] if item.get("type") == "reasoning"]
+        assert len(reasoning_items) == 1
+        assert reasoning_items[0]["summary"][0]["text"] == "Let me think about this..."
+
+    def test_reasoning_content_with_tool_calls(self):
+        """assistant+tool_calls+reasoning_content 应全部转换"""
+        chat_request = {
+            "model": "o3",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "reasoning_content": "I need to call a tool",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "get_data", "arguments": "{}"}
+                    }]
+                }
+            ]
+        }
+        result = OpenAIResponsesConverter.from_openai_chat_request(chat_request)
+        assert isinstance(result["input"], list)
+        types = [item.get("type") for item in result["input"]]
+        assert "reasoning" in types
+        assert "function_call" in types
+
+
+class TestResponsesEventToChatChunk:
+    """测试 Responses SSE 事件到 Chat 流式块的转换"""
+
+    def test_output_text_delta(self):
+        """response.output_text.delta 事件转换"""
+        data = {
+            "type": "response.output_text.delta",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "Hello",
+            "response": {"id": "resp_123", "model": "gpt-4o"}
+        }
+        result = OpenAIResponsesConverter._convert_responses_event_to_chat_chunk(
+            "response.output_text.delta", data
+        )
+        assert result is not None
+        assert result["choices"][0]["delta"]["content"] == "Hello"
+
+    def test_reasoning_text_delta(self):
+        """response.reasoning_text.delta 事件转换"""
+        data = {
+            "type": "response.reasoning_text.delta",
+            "output_index": 0,
+            "delta": "Thinking...",
+            "response": {"id": "resp_123", "model": "o3"}
+        }
+        result = OpenAIResponsesConverter._convert_responses_event_to_chat_chunk(
+            "response.reasoning_text.delta", data
+        )
+        assert result is not None
+        assert result["choices"][0]["delta"]["reasoning_content"] == "Thinking..."
+
+    def test_function_call_arguments_delta(self):
+        """response.function_call_arguments.delta 事件转换"""
+        data = {
+            "type": "response.function_call_arguments.delta",
+            "output_index": 1,
+            "delta": '{"city":',
+            "response": {"id": "resp_123", "model": "gpt-4o"}
+        }
+        result = OpenAIResponsesConverter._convert_responses_event_to_chat_chunk(
+            "response.function_call_arguments.delta", data
+        )
+        assert result is not None
+        assert result["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"] == '{"city":'
+
+    def test_output_item_added_message(self):
+        """response.output_item.added (message) 事件转换"""
+        data = {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {"type": "message", "id": "msg_123", "role": "assistant", "content": []},
+            "response": {"id": "resp_123", "model": "gpt-4o"}
+        }
+        result = OpenAIResponsesConverter._convert_responses_event_to_chat_chunk(
+            "response.output_item.added", data
+        )
+        assert result is not None
+        assert result["choices"][0]["delta"]["role"] == "assistant"
+
+    def test_output_item_added_function_call(self):
+        """response.output_item.added (function_call) 事件转换"""
+        data = {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {"type": "function_call", "id": "fc_123", "call_id": "fc_123", "name": "get_weather", "arguments": ""},
+            "response": {"id": "resp_123", "model": "gpt-4o"}
+        }
+        result = OpenAIResponsesConverter._convert_responses_event_to_chat_chunk(
+            "response.output_item.added", data
+        )
+        assert result is not None
+        tc = result["choices"][0]["delta"]["tool_calls"][0]
+        assert tc["function"]["name"] == "get_weather"
+
+    def test_response_completed(self):
+        """response.completed 事件转换"""
+        data = {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_123",
+                "model": "gpt-4o",
+                "status": "completed",
+                "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+            }
+        }
+        result = OpenAIResponsesConverter._convert_responses_event_to_chat_chunk(
+            "response.completed", data
+        )
+        assert result is not None
+        assert result["choices"][0]["finish_reason"] == "stop"
+        assert result["usage"]["prompt_tokens"] == 10
+
+    def test_response_incomplete_max_tokens(self):
+        """response.incomplete (max_output_tokens) 事件转换"""
+        data = {
+            "type": "response.incomplete",
+            "response": {
+                "id": "resp_123",
+                "model": "gpt-4o",
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+            }
+        }
+        result = OpenAIResponsesConverter._convert_responses_event_to_chat_chunk(
+            "response.incomplete", data
+        )
+        assert result is not None
+        assert result["choices"][0]["finish_reason"] == "length"
+
+    def test_output_text_done_returns_none(self):
+        """response.output_text.done 不需要转换"""
+        data = {"type": "response.output_text.done", "response": {"id": "resp_123"}}
+        result = OpenAIResponsesConverter._convert_responses_event_to_chat_chunk(
+            "response.output_text.done", data
+        )
+        assert result is None
+
+    def test_unknown_event_returns_none(self):
+        """未知事件类型返回 None"""
+        data = {"type": "response.ping"}
+        result = OpenAIResponsesConverter._convert_responses_event_to_chat_chunk(
+            "response.ping", data
+        )
+        assert result is None

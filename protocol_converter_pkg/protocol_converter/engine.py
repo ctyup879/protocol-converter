@@ -543,6 +543,27 @@ class ProtocolConverterEngine:
         if inference_geo:
             anthropic_request["inference_geo"] = inference_geo
         
+        # Anthropic 特有参数恢复（从 Anthropic→Chat 转换时通过 extra_body 合并到顶层）
+        # 这些参数在 Chat API 中不存在，但在 Anthropic→Chat→Anthropic 往返转换中需要恢复
+        if request.get("top_k") is not None:
+            anthropic_request["top_k"] = request["top_k"]
+        if request.get("container") is not None:
+            anthropic_request["container"] = request["container"]
+        if request.get("cache_control") is not None:
+            anthropic_request["cache_control"] = request["cache_control"]
+        if request.get("output_config") is not None:
+            anthropic_request["output_config"] = request["output_config"]
+        
+        # 恢复 Anthropic 服务器工具（从 extra_body.anthropic_server_tools 合并到顶层的）
+        anthropic_server_tools = request.get("anthropic_server_tools")
+        if isinstance(anthropic_server_tools, list) and anthropic_server_tools:
+            existing_tools = anthropic_request.get("tools", [])
+            existing_ids = {t.get("type") for t in existing_tools if isinstance(t, dict)}
+            for st in anthropic_server_tools:
+                if isinstance(st, dict) and st.get("type") not in existing_ids:
+                    existing_tools.append(st)
+            anthropic_request["tools"] = existing_tools
+        
         # Chat API 不支持的参数 -> extra_body
         extra = {}
         if request.get("parallel_tool_calls") is not None:
@@ -1043,11 +1064,26 @@ class ProtocolConverterEngine:
                             else:
                                 yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
                             continue
-                        # Responses→Chat/Anthropic: 当前假设 Responses 后端返回 Responses 格式事件
-                        # 大多数 Responses 兼容后端（如 OpenRouter）实际返回 Chat 格式 SSE
-                        # 对于真正的 Responses 格式后端，需要额外的转换器
-                        # 目前直接使用 Chat 格式块处理
+                        # Responses→Chat/Anthropic: Responses 后端返回 Responses 格式事件
+                        # 需要先转换为 Chat 格式，再转换为目标协议
+                        event_type = pending_event_type
                         pending_event_type = None
+                        if event_type and event_type not in ("response.created", "response.in_progress", "response.completed", "response.failed", "response.incomplete", "response.ping"):
+                            # 对于输出事件，尝试转换为 Chat 流式块
+                            chat_chunk = self.openai_responses._convert_responses_event_to_chat_chunk(event_type, chunk)
+                            if chat_chunk:
+                                stream_chunks = self.convert_stream_chunk_multi(chat_chunk, source_protocol)
+                                for sc in stream_chunks:
+                                    if source_protocol == Protocol.ANTHROPIC:
+                                        yield sc.to_anthropic_sse()
+                                    elif source_protocol == Protocol.OPENAI_RESPONSES:
+                                        yield sc.to_sse()
+                                    else:
+                                        yield sc.to_openai_chunk()
+                                continue
+                        elif event_type in ("response.completed", "response.failed", "response.incomplete"):
+                            # 完成/失败/不完整事件 - 提取 usage 信息
+                            pass
                     
                     # 使用多事件转换，以支持 Anthropic 的一对多映射
                     stream_chunks = self.convert_stream_chunk_multi(chunk, source_protocol)
