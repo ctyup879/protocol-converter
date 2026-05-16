@@ -18,7 +18,8 @@
 - **Structured Outputs 往返**：Responses `text.format` ↔ Chat `response_format` ↔ Anthropic `output_format` 的 `json_schema` 格式正确互转，支持 `name`/`schema`/`strict` 字段完整映射
 - **annotations 保留**：Chat `message.annotations` ↔ Responses `output_text.annotations` ↔ Anthropic `text.citations` 跨协议保留
 - **`is_error` 字段处理**：Anthropic `tool_result.is_error` 在转换时添加 `[Error]` 前缀标记
-- **模型映射**：自定义模型名称映射表
+- **模型映射**：自定义模型名称映射表，支持请求正向映射与响应反向映射
+- **同协议透传优化**：源协议与后端协议一致时，请求直接浅拷贝透传（无需修改时）或最小修改（模型映射 / developer 降级 / extra_body 合并），流式响应直接转发原始 SSE，避免不必要的 JSON 解析再序列化
 - **三种后端**：OpenAI Chat / OpenAI Responses / Anthropic
 
 ## 安装
@@ -193,7 +194,8 @@ config = ConverterConfig(
 | `stream` | bool | `False` | 是否启用流式响应 |
 | `extra_headers` | dict | `{}` | 额外请求头 |
 | `extra_body` | dict | `{}` | 额外请求体参数 |
-| `model_mapping` | dict | `{}` | 模型名称映射表 |
+| `model_mapping` | dict | `{}` | 模型名称映射表（请求：原始模型 → 后端模型） |
+| `reverse_model_mapping_in_stream` | bool | `False` | 响应中是否将 model 反向替换为原始请求模型名（`True` 时隐藏后端实际模型） |
 | `anthropic_version` | str | `"2023-06-01"` | Anthropic API 版本 |
 | `inference_geo` | str | `None` | Anthropic 推理地理区域 |
 | `prompt_cache_key` | str | `None` | OpenAI 提示缓存键（替代 `user`） |
@@ -448,7 +450,7 @@ protocol_converter_pkg/
 │   ├── openai_responses.py     # OpenAI Responses 转换器
 │   └── engine.py                # 核心转换引擎
 ├── tests/
-│   └── test_protocol_converter.py   # 332 个单元测试
+│   └── test_protocol_converter.py   # 347 个单元测试
 ├── examples/
 │   ├── integration_test_chat_backend.py       # OpenAI Chat 后端集成测试
 │   ├── integration_test_anthropic_backend.py  # Anthropic 后端集成测试
@@ -492,7 +494,7 @@ pip install pytest pytest-asyncio httpx
 # 1. 进入项目目录
 cd /root/repos/ai-proxy/protocol_converter_pkg
 
-# 2. 运行全部 332 个单元测试
+# 2. 运行全部 347 个单元测试
 python3 -m pytest tests/test_protocol_converter.py -v
 
 # 3. 运行带覆盖率的测试
@@ -529,7 +531,7 @@ python3 examples/integration_test_all_9_paths.py
 
 | 测试类型 | 测试文件 | 测试数量 | 通过标准 |
 |---------|---------|---------|---------|
-| 单元测试 | `tests/test_protocol_converter.py` | 332 | 全部通过 |
+| 单元测试 | `tests/test_protocol_converter.py` | 347 | 全部通过 |
 | Chat 后端集成测试 | `examples/integration_test_chat_backend.py` | 8 | 全部通过 |
 | Anthropic 后端集成测试 | `examples/integration_test_anthropic_backend.py` | 7 | 全部通过 |
 | Responses 后端集成测试 | `examples/integration_test_responses_backend.py` | 7 | 全部通过 |
@@ -554,6 +556,15 @@ python3 examples/integration_test_all_9_paths.py
 - [anthropic-sdk-python](https://github.com/anthropics/anthropic-sdk-python)
 
 ## 更新日志
+
+### v1.19.0
+
+- **同协议快速路径优化**：`convert_request` 在源协议与目标后端协议一致时，若无需任何修改直接浅拷贝透传；仅需模型映射 / developer 降级 / extra_body 合并时只做最小修改，避免完整 deepcopy+转换的性能损耗
+- **流式同协议直接转发**：`_handle_stream_response` 中 Chat→Chat、Anthropic→Anthropic、Responses→Responses 同协议时直接转发原始 SSE，跳过 `json.loads` + `convert_stream_chunk_multi` + `json.dumps` 的冗余处理
+- **流式 Responses event 丢失修复**：`_handle_stream_response` 中 Responses 后端的 `event:` 行之前因 `pending_event_type` 被提前清空而丢失，现已修复
+- **响应反向模型映射**：新增 `ConverterConfig.reverse_model_mapping_in_stream` 参数，控制非流式和流式响应中是否将 `model` 字段替换回原始请求模型名（默认 `False`，保持后端透传行为）
+- **新增 15 个单元测试**覆盖同协议透传、反向模型映射（含非流式与流式场景）
+- **全部 347 个单元测试通过**
 
 ### v1.18.0
 
@@ -586,7 +597,7 @@ python3 examples/integration_test_all_9_paths.py
 
 **测试覆盖：**
 
-- 全部 332 个单元测试通过
+- 全部 347 个单元测试通过
 - 4 项集成测试全部通过（Chat 后端、Anthropic 后端、Responses 后端、3×3 全量 9 路）
 
 ### v1.17.0
@@ -619,7 +630,7 @@ python3 examples/integration_test_all_9_paths.py
 **测试覆盖：**
 
 - 新增 11 个单元测试（4 个 `TestVerbosityMapping`、3 个 `TestReasoningGenerateSummary`、2 个 `TestSystemCacheControl`、2 个 `TestConvertContentToAnthropicEmpty`）
-- 全部 332 个单元测试通过
+- 全部 347 个单元测试通过
 
 ### v1.16.0
 

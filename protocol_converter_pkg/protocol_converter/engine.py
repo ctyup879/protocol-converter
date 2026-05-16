@@ -60,6 +60,10 @@ class ConverterConfig:
     # 模型映射表：模型名 -> 目标后端模型名
     model_mapping: Dict[str, str] = field(default_factory=dict)
     
+    # 流式响应中是否将模型名反向替换为原始请求中的模型名
+    # True: 用户看到原始模型名；False: 用户看到后端的模型名（默认）
+    reverse_model_mapping_in_stream: bool = False
+    
     # Anthropic 特有配置
     # 推理地理区域 (Anthropic inference_geo 参数)
     inference_geo: Optional[str] = None
@@ -156,6 +160,42 @@ class ProtocolConverterEngine:
             Protocol: 检测到的协议
         """
         return self.detector.detect(request)
+
+    def _is_same_protocol(self, source_protocol: Protocol, target_format: str) -> bool:
+        """判断源协议和目标格式是否为同一协议"""
+        return (
+            (source_protocol == Protocol.OPENAI_CHAT and target_format == "openai_chat")
+            or (source_protocol == Protocol.ANTHROPIC and target_format == "anthropic")
+            or (source_protocol == Protocol.OPENAI_RESPONSES and target_format == "openai_responses")
+        )
+
+    def _needs_request_modification(self, request: Dict[str, Any], target_format: str) -> bool:
+        """
+        判断同协议请求是否需要修改。
+        即使同协议，若存在以下情况也需要做最小修改：
+        - 模型映射（请求模型与后端模型不一致）
+        - developer 角色需降级为 system
+        - 请求自身包含 extra_body 需要合并到顶层
+        """
+        if not isinstance(request, dict):
+            return False
+
+        # 模型映射
+        model = request.get("model")
+        if model and self.config.get_model(model) != model:
+            return True
+
+        # developer 降级
+        if target_format == "openai_chat":
+            for msg in request.get("messages", []):
+                if isinstance(msg, dict) and msg.get("role") == "developer":
+                    return True
+
+        # 请求自身的 extra_body 需要合并
+        if "extra_body" in request:
+            return True
+
+        return False
     
     def convert_request(
         self, 
@@ -164,6 +204,9 @@ class ProtocolConverterEngine:
     ) -> Dict[str, Any]:
         """
         转换请求到目标格式
+        
+        同协议且无需任何修改时直接透传（浅拷贝），
+        避免不必要的 deepcopy 和字段变更。
         
         Args:
             request: 输入请求
@@ -179,6 +222,37 @@ class ProtocolConverterEngine:
         if target_format is None:
             target_format = self._get_target_format()
         
+        # 同协议快速路径：尽可能透传，只做必要的最小修改
+        if self._is_same_protocol(source_protocol, target_format):
+            needs_mod = self._needs_request_modification(request, target_format)
+            if not needs_mod:
+                # 完全透传：返回浅拷贝，避免调用方被后续修改污染
+                if isinstance(request, dict):
+                    return dict(request)
+                return request
+            # 需要修改：深拷贝后只做最小变更（避免修改原始请求的嵌套对象）
+            result = copy.deepcopy(request) if isinstance(request, dict) else request
+            # 应用模型映射
+            if isinstance(result, dict) and "model" in result:
+                original_model = result["model"]
+                mapped_model = self.config.get_model(original_model)
+                if mapped_model != original_model:
+                    result["model"] = mapped_model
+            # developer 降级
+            if isinstance(result, dict) and target_format == "openai_chat":
+                messages = result.get("messages", [])
+                for msg in messages:
+                    if isinstance(msg, dict) and msg.get("role") == "developer":
+                        msg["role"] = "system"
+            # 合并 extra_body
+            if isinstance(result, dict) and "extra_body" in result:
+                extra = result.pop("extra_body")
+                if isinstance(extra, dict):
+                    for key, value in extra.items():
+                        if key not in result:
+                            result[key] = value
+            return result
+        
         result = None
         
         # 根据源协议和目标格式进行转换
@@ -188,25 +262,20 @@ class ProtocolConverterEngine:
             elif source_protocol == Protocol.OPENAI_RESPONSES:
                 result = self.openai_responses.to_openai_chat(request)
             else:
-                # 已经是 OpenAI Chat 或未知
                 result = copy.deepcopy(request) if isinstance(request, dict) else request
         
         elif target_format == "anthropic":
-            # 转换为 Anthropic 格式
             if source_protocol == Protocol.OPENAI_CHAT:
                 result = self._chat_to_anthropic_request(request)
             elif source_protocol == Protocol.OPENAI_RESPONSES:
-                # 直接转换，避免经 Chat 中转丢失数据（reasoning/text 等特有参数）
                 result = self.openai_responses.to_anthropic_request(request)
             else:
                 result = copy.deepcopy(request) if isinstance(request, dict) else request
         
         elif target_format == "openai_responses":
-            # 转换为 OpenAI Responses 格式
             if source_protocol == Protocol.OPENAI_CHAT:
                 result = self.openai_responses.from_openai_chat_request(request)
             elif source_protocol == Protocol.ANTHROPIC:
-                # 先转为 Chat，再转为 Responses
                 chat_req = self.anthropic.to_openai_chat(request)
                 result = self.openai_responses.from_openai_chat_request(chat_req)
             else:
@@ -222,14 +291,14 @@ class ProtocolConverterEngine:
             if mapped_model != original_model:
                 result["model"] = mapped_model
         
-        # 对 Chat 后端，将 developer 角色降级为 system（部分后端不支持 developer）
+        # 对 Chat 后端，将 developer 角色降级为 system
         if isinstance(result, dict) and target_format == "openai_chat":
             messages = result.get("messages", [])
             for msg in messages:
                 if isinstance(msg, dict) and msg.get("role") == "developer":
                     msg["role"] = "system"
         
-        # 合并 extra_body（将 extra_body 中的字段合并到请求中）
+        # 合并 extra_body
         if isinstance(result, dict) and "extra_body" in result:
             extra = result.pop("extra_body")
             if isinstance(extra, dict):
@@ -746,7 +815,8 @@ class ProtocolConverterEngine:
     def convert_response(
         self, 
         response: Dict[str, Any],
-        target_protocol: Protocol
+        target_protocol: Protocol,
+        original_model: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         转换响应到目标协议格式
@@ -754,6 +824,7 @@ class ProtocolConverterEngine:
         Args:
             response: 后端响应（格式取决于后端类型）
             target_protocol: 目标协议
+            original_model: 用户请求中的原始模型名（用于反向替换响应中的 model）
             
         Returns:
             Dict: 目标协议格式的响应
@@ -761,35 +832,48 @@ class ProtocolConverterEngine:
         # 先判断响应格式（基于后端类型）
         backend_format = self._get_target_format()
         
+        result = response
+        
         # 如果后端是 anthropic 格式，需要先转换为目标协议
         if backend_format == "anthropic":
             if target_protocol == Protocol.ANTHROPIC:
-                return response
+                result = response
             elif target_protocol == Protocol.OPENAI_CHAT:
-                return self._anthropic_to_chat_response(response)
+                result = self._anthropic_to_chat_response(response)
             elif target_protocol == Protocol.OPENAI_RESPONSES:
                 # 直接转换，保留 redacted_thinking (data字段) → encrypted_content
-                return self.anthropic.to_openai_responses(response)
+                result = self.anthropic.to_openai_responses(response)
         
         # 如果后端是 openai_responses 格式
         elif backend_format == "openai_responses":
             if target_protocol == Protocol.OPENAI_RESPONSES:
-                return response
+                result = response
             elif target_protocol == Protocol.ANTHROPIC:
                 # Responses -> Anthropic: 直接转换保留 summary 和 encrypted_content
-                return self.openai_responses.to_anthropic(response)
+                result = self.openai_responses.to_anthropic(response)
             elif target_protocol == Protocol.OPENAI_CHAT:
-                return self._responses_to_chat_response(response)
+                result = self._responses_to_chat_response(response)
         
         # 默认：后端是 openai_chat 格式
-        if target_protocol == Protocol.ANTHROPIC:
-            return self.anthropic.from_openai_chat(response)
-        elif target_protocol == Protocol.OPENAI_RESPONSES:
-            return self.openai_responses.from_openai_chat(response)
-        elif target_protocol == Protocol.OPENAI_CHAT:
-            return response
+        else:
+            if target_protocol == Protocol.ANTHROPIC:
+                result = self.anthropic.from_openai_chat(response)
+            elif target_protocol == Protocol.OPENAI_RESPONSES:
+                result = self.openai_responses.from_openai_chat(response)
+            elif target_protocol == Protocol.OPENAI_CHAT:
+                result = response
         
-        return response
+        # 反向模型映射：若配置启用且模型不一致，将响应中的 model 替换为原始模型名
+        if (self.config.reverse_model_mapping_in_stream
+                and original_model is not None
+                and isinstance(result, dict)
+                and "model" in result):
+            mapped_model = self.config.get_model(original_model)
+            if mapped_model != original_model and result.get("model") == mapped_model:
+                result = dict(result)
+                result["model"] = original_model
+        
+        return result
     
     def _anthropic_to_chat_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
         """将 Anthropic 响应转换为 OpenAI Chat 响应"""
@@ -1068,12 +1152,18 @@ class ProtocolConverterEngine:
         # 发送请求
         is_stream = backend_request.get("stream", False) or self.config.stream
         
+        # 记录模型映射关系，供流式响应反向替换使用
+        original_model = request.get("model") if isinstance(request, dict) else None
+        mapped_model = backend_request.get("model") if isinstance(backend_request, dict) else None
+        
         if is_stream:
             return self._handle_stream_response(
                 backend_request, 
                 headers, 
                 source_protocol,
-                http_client
+                http_client,
+                original_model=original_model,
+                mapped_model=mapped_model,
             )
         else:
             response = await http_client(
@@ -1084,8 +1174,8 @@ class ProtocolConverterEngine:
                 timeout=self.config.timeout
             )
             
-            # 转换响应
-            return self.convert_response(response, source_protocol)
+            # 转换响应（传入 original_model 支持反向模型映射）
+            return self.convert_response(response, source_protocol, original_model=original_model)
     
     async def _handle_stream_response(
         self,
@@ -1093,10 +1183,24 @@ class ProtocolConverterEngine:
         headers: Dict[str, str],
         source_protocol: Protocol,
         http_client: Callable,
+        original_model: Optional[str] = None,
+        mapped_model: Optional[str] = None,
     ) -> Iterator[StreamChunk]:
         """
         处理流式响应
+        
+        Args:
+            original_model: 用户请求中的原始模型名
+            mapped_model: 经 convert_request 映射后的模型名（发给后端的）
         """
+        # 是否有模型映射（模型不一致且配置启用时，反向替换响应中的 model）
+        has_model_mapping = (
+            self.config.reverse_model_mapping_in_stream
+            and original_model is not None
+            and mapped_model is not None
+            and original_model != mapped_model
+        )
+        
         # 确保 stream 为 True
         chat_request["stream"] = True
         
@@ -1150,16 +1254,22 @@ class ProtocolConverterEngine:
                         yield "data: [DONE]\n\n"
                     break
                 
+                # 保存当前 event type 并清空，供后续各分支使用
+                current_event_type = pending_event_type
+                pending_event_type = None
+                
                 try:
                     chunk = json.loads(data_str)
                     
                     # Anthropic 后端返回 Anthropic SSE 格式数据
                     if backend_format == "anthropic":
-                        event_type = pending_event_type or chunk.get("type", "")
-                        pending_event_type = None
+                        event_type = current_event_type or chunk.get("type", "")
                         
                         if source_protocol == Protocol.ANTHROPIC:
                             # Anthropic→Anthropic: 直接转发原始 SSE
+                            # 若存在模型映射，将响应中的 model 替换回原始模型名
+                            if has_model_mapping and "model" in chunk:
+                                chunk["model"] = original_model
                             if event_type:
                                 yield f"event: {event_type}\ndata: {json.dumps(chunk, ensure_ascii=False)}\n\n"
                             else:
@@ -1181,22 +1291,20 @@ class ProtocolConverterEngine:
                                         yield sc.to_openai_chunk()
                             continue
                     
-                    pending_event_type = None
-                    
                     # Responses 后端使用命名 SSE 事件
                     if backend_format == "openai_responses":
-                        # Responses→Responses: 直接转发原始 SSE
+                        # Responses→Responses: 直接转发原始 SSE（保留 event 行）
                         if source_protocol == Protocol.OPENAI_RESPONSES:
-                            if pending_event_type is not None:
-                                yield f"event: {pending_event_type}\ndata: {json.dumps(chunk, ensure_ascii=False)}\n\n"
-                                pending_event_type = None
+                            # 若存在模型映射，将响应中的 model 替换回原始模型名
+                            if has_model_mapping and "model" in chunk:
+                                chunk["model"] = original_model
+                            if current_event_type is not None:
+                                yield f"event: {current_event_type}\ndata: {json.dumps(chunk, ensure_ascii=False)}\n\n"
                             else:
                                 yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
                             continue
                         # Responses→Chat/Anthropic: Responses 后端返回 Responses 格式事件
-                        # 需要先转换为 Chat 格式，再转换为目标协议
-                        event_type = pending_event_type
-                        pending_event_type = None
+                        event_type = current_event_type
                         if event_type and event_type not in ("response.created", "response.in_progress", "response.completed", "response.failed", "response.incomplete", "response.ping"):
                             # 对于输出事件，尝试转换为 Chat 流式块
                             chat_chunk = self.openai_responses._convert_responses_event_to_chat_chunk(event_type, chunk)
@@ -1214,6 +1322,18 @@ class ProtocolConverterEngine:
                             # 完成/失败/不完整事件 - 提取 usage 信息
                             pass
                     
+                    # OpenAI Chat 后端
+                    if backend_format == "openai_chat" and source_protocol == Protocol.OPENAI_CHAT:
+                        # Chat→Chat: 直接转发原始 SSE，避免 json.loads/dumps 的字段顺序变化与性能损耗
+                        # 若存在模型映射，将响应中的 model 替换回原始模型名
+                        if has_model_mapping and "model" in chunk:
+                            chunk["model"] = original_model
+                        if current_event_type is not None:
+                            yield f"event: {current_event_type}\ndata: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+                        else:
+                            yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+                        continue
+                    
                     # 使用多事件转换，以支持 Anthropic 的一对多映射
                     stream_chunks = self.convert_stream_chunk_multi(chunk, source_protocol)
                     
@@ -1226,7 +1346,6 @@ class ProtocolConverterEngine:
                         else:
                             yield sc.to_openai_chunk()
                 except json.JSONDecodeError:
-                    pending_event_type = None
                     continue
 
 

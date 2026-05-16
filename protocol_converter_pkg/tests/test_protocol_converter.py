@@ -6447,3 +6447,237 @@ class TestConvertContentToAnthropicEmpty:
         ])
         assert isinstance(result, list)
         assert result[0]["text"] == "Hello"
+
+
+class TestEngineSameProtocolPassthrough:
+    """测试同协议快速路径"""
+
+    def test_chat_to_chat_passthrough_no_modification(self):
+        """Chat→Chat 无需修改时直接透传（浅拷贝而非深拷贝）"""
+        engine = ProtocolConverterEngine()
+        request = {"model": "gpt-4o", "messages": [{"role": "user", "content": "Hello"}]}
+        result = engine.convert_request(request)
+        assert result is not request  # 不是同一个对象（浅拷贝）
+        assert result == request      # 但内容一致
+        assert result["model"] == "gpt-4o"
+
+    def test_chat_to_chat_model_mapping_only(self):
+        """Chat→Chat 仅模型不一致时只做最小修改"""
+        config = ConverterConfig(model_mapping={"gpt-4o": "gpt-4o-mini"})
+        engine = ProtocolConverterEngine(config)
+        request = {"model": "gpt-4o", "messages": [{"role": "user", "content": "Hello"}]}
+        result = engine.convert_request(request)
+        assert result["model"] == "gpt-4o-mini"
+        assert result["messages"] == request["messages"]
+
+    def test_chat_to_chat_developer_downgrade(self):
+        """Chat→Chat developer 角色降级为 system"""
+        engine = ProtocolConverterEngine()
+        request = {
+            "model": "gpt-4o",
+            "messages": [{"role": "developer", "content": "sys"}]
+        }
+        result = engine.convert_request(request)
+        assert result["messages"][0]["role"] == "system"
+
+    def test_chat_to_chat_extra_body_merge(self):
+        """Chat→Chat extra_body 合并到顶层"""
+        engine = ProtocolConverterEngine()
+        request = {
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "extra_body": {"custom_key": "custom_value"}
+        }
+        result = engine.convert_request(request)
+        assert result.get("custom_key") == "custom_value"
+        assert "extra_body" not in result
+
+    def test_anthropic_to_anthropic_passthrough(self):
+        """Anthropic→Anthropic 同协议透传"""
+        config = ConverterConfig(backend_type="anthropic")
+        engine = ProtocolConverterEngine(config)
+        request = {
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Hello"}]
+        }
+        result = engine.convert_request(request)
+        assert result is not request
+        assert result["model"] == "claude-sonnet-4-20250514"
+        assert result["max_tokens"] == 1024
+
+    def test_responses_to_responses_passthrough(self):
+        """Responses→Responses 同协议透传"""
+        config = ConverterConfig(backend_type="openai_responses")
+        engine = ProtocolConverterEngine(config)
+        request = {
+            "model": "gpt-4o",
+            "input": [{"type": "message", "role": "user", "content": [{"type": "text", "text": "Hello"}]}]
+        }
+        result = engine.convert_request(request)
+        assert result is not request
+        assert result["model"] == "gpt-4o"
+
+
+class TestEngineReverseModelMapping:
+    """测试响应反向模型映射"""
+
+    def test_response_no_reverse_by_default(self):
+        """默认不反向替换 model"""
+        config = ConverterConfig(
+            backend_type="openai",
+            model_mapping={"gpt-4o": "gpt-4o-mini"}
+        )
+        engine = ProtocolConverterEngine(config)
+        response = {"id": "1", "model": "gpt-4o-mini", "choices": []}
+        result = engine.convert_response(response, Protocol.OPENAI_CHAT, original_model="gpt-4o")
+        assert result["model"] == "gpt-4o-mini"
+
+    def test_response_reverse_when_enabled(self):
+        """启用后非流式响应反向替换 model"""
+        config = ConverterConfig(
+            backend_type="openai",
+            model_mapping={"gpt-4o": "gpt-4o-mini"},
+            reverse_model_mapping_in_stream=True
+        )
+        engine = ProtocolConverterEngine(config)
+        response = {"id": "1", "model": "gpt-4o-mini", "choices": []}
+        result = engine.convert_response(response, Protocol.OPENAI_CHAT, original_model="gpt-4o")
+        assert result["model"] == "gpt-4o"
+
+    def test_response_no_reverse_when_no_mapping(self):
+        """无模型映射时不反向替换"""
+        config = ConverterConfig(
+            backend_type="openai",
+            reverse_model_mapping_in_stream=True
+        )
+        engine = ProtocolConverterEngine(config)
+        response = {"id": "1", "model": "gpt-4o", "choices": []}
+        result = engine.convert_response(response, Protocol.OPENAI_CHAT, original_model="gpt-4o")
+        assert result["model"] == "gpt-4o"
+
+    def test_response_reverse_anthropic_same_protocol(self):
+        """Anthropic 同协议响应反向替换"""
+        config = ConverterConfig(
+            backend_type="anthropic",
+            model_mapping={"claude-a": "claude-b"},
+            reverse_model_mapping_in_stream=True
+        )
+        engine = ProtocolConverterEngine(config)
+        response = {"id": "1", "model": "claude-b", "content": [], "usage": {}}
+        result = engine.convert_response(response, Protocol.ANTHROPIC, original_model="claude-a")
+        assert result["model"] == "claude-a"
+
+    def test_response_reverse_responses_same_protocol(self):
+        """Responses 同协议响应反向替换"""
+        config = ConverterConfig(
+            backend_type="openai_responses",
+            model_mapping={"gpt-4o": "gpt-4o-mini"},
+            reverse_model_mapping_in_stream=True
+        )
+        engine = ProtocolConverterEngine(config)
+        response = {"id": "1", "model": "gpt-4o-mini", "output": [], "usage": {}}
+        result = engine.convert_response(response, Protocol.OPENAI_RESPONSES, original_model="gpt-4o")
+        assert result["model"] == "gpt-4o"
+
+    @pytest.mark.asyncio
+    async def test_stream_chat_to_chat_reverse_model(self):
+        """流式 Chat→Chat 反向替换 model"""
+        config = ConverterConfig(
+            backend_type="openai",
+            model_mapping={"gpt-4o": "gpt-4o-mini"},
+            reverse_model_mapping_in_stream=True
+        )
+        engine = ProtocolConverterEngine(config)
+
+        async def mock_http_client(**kwargs):
+            class MockResponse:
+                async def aiter_lines(self):
+                    yield 'data: {"id":"1","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":"Hi"}}]}'
+                    yield 'data: [DONE]'
+            return MockResponse()
+
+        request = {"model": "gpt-4o", "messages": [{"role": "user", "content": "Hello"}], "stream": True}
+        gen = await engine.convert_and_forward(request, mock_http_client)
+        chunks = [chunk async for chunk in gen]
+
+        data_chunks = [c for c in chunks if '[DONE]' not in c]
+        assert len(data_chunks) == 1
+        assert '"model": "gpt-4o"' in data_chunks[0]
+        assert '"model": "gpt-4o-mini"' not in data_chunks[0]
+
+    @pytest.mark.asyncio
+    async def test_stream_chat_to_chat_no_reverse_by_default(self):
+        """流式 Chat→Chat 默认不反向替换 model"""
+        config = ConverterConfig(
+            backend_type="openai",
+            model_mapping={"gpt-4o": "gpt-4o-mini"}
+        )
+        engine = ProtocolConverterEngine(config)
+
+        async def mock_http_client(**kwargs):
+            class MockResponse:
+                async def aiter_lines(self):
+                    yield 'data: {"id":"1","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":"Hi"}}]}'
+                    yield 'data: [DONE]'
+            return MockResponse()
+
+        request = {"model": "gpt-4o", "messages": [{"role": "user", "content": "Hello"}], "stream": True}
+        gen = await engine.convert_and_forward(request, mock_http_client)
+        chunks = [chunk async for chunk in gen]
+
+        data_chunks = [c for c in chunks if '[DONE]' not in c]
+        assert len(data_chunks) == 1
+        assert '"model": "gpt-4o-mini"' in data_chunks[0]
+
+    @pytest.mark.asyncio
+    async def test_stream_anthropic_to_anthropic_passthrough(self):
+        """流式 Anthropic→Anthropic 直接转发原始 SSE"""
+        config = ConverterConfig(backend_type="anthropic")
+        engine = ProtocolConverterEngine(config)
+
+        async def mock_http_client(**kwargs):
+            class MockResponse:
+                async def aiter_lines(self):
+                    yield 'event: content_block_delta'
+                    yield 'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}'
+                    yield 'data: [DONE]'
+            return MockResponse()
+
+        request = {
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": True
+        }
+        gen = await engine.convert_and_forward(request, mock_http_client)
+        chunks = [chunk async for chunk in gen]
+
+        data_chunks = [c for c in chunks if '[DONE]' not in c]
+        assert any(c.startswith('event: content_block_delta') for c in data_chunks)
+        assert any('"text": "Hi"' in c for c in data_chunks)
+
+    @pytest.mark.asyncio
+    async def test_stream_responses_to_responses_passthrough(self):
+        """流式 Responses→Responses 直接转发原始 SSE（保留 event 行）"""
+        config = ConverterConfig(backend_type="openai_responses")
+        engine = ProtocolConverterEngine(config)
+
+        async def mock_http_client(**kwargs):
+            class MockResponse:
+                async def aiter_lines(self):
+                    yield 'event: response.output_text.delta'
+                    yield 'data: {"type":"response.output_text.delta","item_id":"i1","output_index":0,"content_index":0,"delta":"Hi"}'
+                    yield 'data: [DONE]'
+            return MockResponse()
+
+        request = {
+            "model": "gpt-4o",
+            "input": [{"type": "message", "role": "user", "content": [{"type": "text", "text": "Hello"}]}],
+            "stream": True
+        }
+        gen = await engine.convert_and_forward(request, mock_http_client)
+        chunks = [chunk async for chunk in gen]
+
+        data_chunks = [c for c in chunks if '[DONE]' not in c]
+        assert any(c.startswith('event: response.output_text.delta') for c in data_chunks)
