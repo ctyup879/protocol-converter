@@ -61,7 +61,7 @@ OpenAI Responses 输出项类型:
 - compaction_item: 压缩项
 
 OpenAI Responses 流式事件 (严格顺序):
-  response.created -> response.in_progress -> [response.output_item.added -> [response.content_part.added -> response.output_text.delta* -> response.output_text.done -> response.content_part.done]? -> response.function_call_arguments.delta* -> response.function_call_arguments.done]? -> response.output_item.done]* -> response.completed | response.failed
+  response.created -> response.in_progress -> [response.output_item.added -> [response.content_part.added -> response.output_text.delta* -> response.output_text.done -> response.content_part.done]? -> [response.reasoning_summary_part.added -> response.reasoning_summary_text.delta* -> response.reasoning_summary_text.done -> response.reasoning_summary_part.done]? -> [response.function_call_arguments.delta* -> response.function_call_arguments.done]? -> response.output_item.done]* -> response.completed | response.failed | response.incomplete
 - response.created: 响应创建
 - response.in_progress: 响应进行中
 - response.output_item.added: 输出项添加
@@ -69,11 +69,26 @@ OpenAI Responses 流式事件 (严格顺序):
 - response.output_text.delta: 文本增量
 - response.output_text.done: 文本完成
 - response.content_part.done: 内容部分完成
+- response.refusal.delta: 拒绝内容增量
+- response.refusal.done: 拒绝内容完成
+- response.reasoning_summary_part.added: 推理摘要部分添加
+- response.reasoning_summary_part.done: 推理摘要部分完成
+- response.reasoning_summary_text.delta: 推理摘要文本增量
+- response.reasoning_summary_text.done: 推理摘要文本完成
 - response.function_call_arguments.delta: 函数调用参数增量
 - response.function_call_arguments.done: 函数调用参数完成
 - response.output_item.done: 输出项完成
 - response.completed: 响应完成
 - response.failed: 响应失败
+- response.incomplete: 响应不完整
+- response.reasoning_text.delta: 推理文本增量
+- response.reasoning_text.done: 推理文本完成
+- response.web_search_call.in_progress/searching/completed: 网页搜索
+- response.file_search_call.in_progress/searching/completed: 文件搜索
+- response.code_interpreter_call.in_progress/completed: 代码解释器
+- response.code_interpreter_call_code.delta/done: 代码解释器代码
+- response.computer_call.in_progress/completed: 计算机调用
+- response.ping: 心跳
 
 OpenAI Responses Usage 字段:
 - input_tokens: 输入 token 数
@@ -1099,7 +1114,25 @@ class OpenAIResponsesConverter:
                 else:
                     anthropic_request["thinking"] = {"type": "disabled"}
         
-        # 7. text.format -> 无直接映射（Anthropic 不支持 response_format）
+        # 7. text.format → Anthropic output_format (结构化输出映射)
+        # Responses: {"type": "json_schema", "name": "...", "schema": {...}}
+        # Anthropic: {"type": "json_schema", "name": "...", "schema": {...}}
+        text_config = request.get("text")
+        if text_config and isinstance(text_config, dict):
+            format_config = text_config.get("format")
+            if format_config and isinstance(format_config, dict):
+                fmt_type = format_config.get("type")
+                if fmt_type == "json_schema":
+                    output_format = {"type": "json_schema"}
+                    if format_config.get("name"):
+                        output_format["name"] = format_config["name"]
+                    if format_config.get("schema"):
+                        output_format["schema"] = format_config["schema"]
+                    if format_config.get("strict") is not None:
+                        output_format["strict"] = format_config["strict"]
+                    anthropic_request["output_format"] = output_format
+                elif fmt_type == "json_object":
+                    anthropic_request["output_format"] = {"type": "json_object"}
         
         # 8. metadata.user_id
         metadata = request.get("metadata")
@@ -1345,6 +1378,9 @@ class OpenAIResponsesConverter:
                     return {"type": "tool", "name": name}
                 return "auto"
         return None
+
+    @classmethod
+    def _convert_chat_content_to_responses(cls, content: List[Dict]) -> List[Dict]:
         """转换 Chat 内容数组为 Responses 输入内容格式"""
         result = []
         for item in content:
@@ -2030,6 +2066,7 @@ class OpenAIResponsesConverter:
         "started_function_ids": set(),
         "output_index": 0,
         "reasoning_item_started": False,
+        "reasoning_summary_started": False,
     }
     
     @classmethod
@@ -2041,6 +2078,7 @@ class OpenAIResponsesConverter:
             "started_function_ids": set(),
             "output_index": 0,
             "reasoning_item_started": False,
+            "reasoning_summary_started": False,
         }
     
     @classmethod
@@ -2051,10 +2089,33 @@ class OpenAIResponsesConverter:
         Responses 流式事件严格顺序:
         response.created -> response.in_progress -> 
         [response.output_item.added -> 
-          [response.content_part.added -> response.output_text.delta* -> response.output_text.done -> response.content_part.done]?
+          [response.content_part.added -> 
+            response.output_text.delta* -> response.output_text.done 
+            | response.refusal.delta* -> response.refusal.done
+          -> response.content_part.done]?
+          [response.reasoning_summary_part.added -> 
+            response.reasoning_summary_text.delta* -> response.reasoning_summary_text.done 
+          -> response.reasoning_summary_part.done]?
           [response.function_call_arguments.delta* -> response.function_call_arguments.done]?
         -> response.output_item.done]* 
-        -> response.completed
+        -> response.completed | response.failed | response.incomplete
+        
+        完整事件类型列表:
+        - response.created / response.in_progress / response.completed / response.failed / response.incomplete
+        - response.output_item.added / response.output_item.done
+        - response.content_part.added / response.content_part.done
+        - response.output_text.delta / response.output_text.done
+        - response.refusal.delta / response.refusal.done
+        - response.reasoning_summary_part.added / response.reasoning_summary_part.done
+        - response.reasoning_summary_text.delta / response.reasoning_summary_text.done
+        - response.function_call_arguments.delta / response.function_call_arguments.done
+        - response.reasoning_text.delta / response.reasoning_text.done
+        - response.web_search_call.in_progress / .searching / .completed
+        - response.file_search_call.in_progress / .searching / .completed
+        - response.code_interpreter_call.in_progress / .completed
+        - response.code_interpreter_call_code.delta / .done
+        - response.computer_call.in_progress / .completed
+        - response.ping
         
         注意：一个 OpenAI chunk 可能需要生成多个 Responses 事件
         
@@ -2383,11 +2444,13 @@ class OpenAIResponsesConverter:
             if incomplete_details:
                 completed_response["incomplete_details"] = incomplete_details
             
-            # 根据状态选择完成或失败事件类型
+            # 根据状态选择完成、失败或不完整事件类型
             if response_status == "failed":
                 if error_detail:
                     completed_response["error"] = error_detail
                 event_type = "response.failed"
+            elif response_status == "incomplete":
+                event_type = "response.incomplete"
             else:
                 event_type = "response.completed"
             

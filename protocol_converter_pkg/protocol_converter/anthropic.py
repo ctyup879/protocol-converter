@@ -28,6 +28,7 @@ Anthropic Messages API 请求参数:
 - service_tier: 服务层级 ("auto" | "standard_only")
 - container: 容器标识
 - output_config: 输出配置
+- output_format: 结构化输出格式 (Pydantic模型类 | {"type": "json_schema", "name": "...", "schema": {...}} | {"type": "json_object"})
 - inference_geo: 推理地理区域
 
 Anthropic 消息内容块类型:
@@ -231,6 +232,31 @@ class AnthropicConverter:
             mapped = cls.SERVICE_TIER_MAP.get(request["service_tier"])
             if mapped:
                 chat_request["service_tier"] = mapped
+        
+        # 6.5 处理 output_format 参数 (Anthropic 结构化输出 → Chat response_format)
+        # Anthropic: output_format: Pydantic 模型类 或 {"type": "json_schema", ...}
+        # Chat: response_format: {"type": "json_schema", "json_schema": {"name": "...", "schema": {...}}}
+        output_format = request.get("output_format")
+        if output_format and isinstance(output_format, dict):
+            fmt_type = output_format.get("type", "")
+            if fmt_type == "json_schema":
+                # Anthropic json_schema 格式 → Chat json_schema 格式
+                json_schema = {}
+                if output_format.get("name"):
+                    json_schema["name"] = output_format["name"]
+                if output_format.get("schema"):
+                    json_schema["schema"] = output_format["schema"]
+                if output_format.get("strict") is not None:
+                    json_schema["strict"] = output_format["strict"]
+                if json_schema:
+                    chat_request["response_format"] = {
+                        "type": "json_schema",
+                        "json_schema": json_schema
+                    }
+            elif fmt_type == "json_object":
+                chat_request["response_format"] = {"type": "json_object"}
+            elif fmt_type == "text":
+                chat_request["response_format"] = {"type": "text"}
         
         # 7. 处理 thinking 参数 -> OpenAI reasoning_effort
         thinking = request.get("thinking")

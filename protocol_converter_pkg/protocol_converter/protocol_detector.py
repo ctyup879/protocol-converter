@@ -51,7 +51,7 @@ class ProtocolDetector:
     # Anthropic 特有参数
     ANTHROPIC_SPECIFIC_KEYS = {
         "stop_sequences", "thinking", "cache_control", "top_k",
-        "container", "output_config", "inference_geo",
+        "container", "output_config", "output_format", "inference_geo",
     }
     # Anthropic 特有的服务器工具类型
     ANTHROPIC_SERVER_TOOL_TYPES = {

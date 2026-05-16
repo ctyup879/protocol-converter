@@ -4739,3 +4739,196 @@ class TestBugFixesV1_10_0:
         result = OpenAIResponsesConverter.from_openai_chat_request(chat_request)
         # include_obfuscation 是 Responses 特有字段，应正确传递
         assert result.get("stream_options") == {"include_obfuscation": True}
+
+
+class TestConvertChatContentToResponses:
+    """测试 _convert_chat_content_to_responses 方法（修复后）"""
+
+    def test_text_content(self):
+        """测试文本内容转换"""
+        result = OpenAIResponsesConverter._convert_chat_content_to_responses([
+            {"type": "text", "text": "Hello"}
+        ])
+        assert len(result) == 1
+        assert result[0]["type"] == "input_text"
+        assert result[0]["text"] == "Hello"
+
+    def test_image_url_content(self):
+        """测试图片 URL 内容转换"""
+        result = OpenAIResponsesConverter._convert_chat_content_to_responses([
+            {"type": "image_url", "image_url": {"url": "https://example.com/img.png"}}
+        ])
+        assert len(result) == 1
+        assert result[0]["type"] == "input_image"
+        assert result[0]["image_url"] == "https://example.com/img.png"
+
+    def test_file_content(self):
+        """测试文件内容转换"""
+        result = OpenAIResponsesConverter._convert_chat_content_to_responses([
+            {"type": "file", "file": {"file_data": "data:application/pdf;base64,abc", "filename": "test.pdf"}}
+        ])
+        assert len(result) == 1
+        assert result[0]["type"] == "input_file"
+        assert result[0]["file_data"] == "data:application/pdf;base64,abc"
+        assert result[0]["filename"] == "test.pdf"
+
+    def test_mixed_content(self):
+        """测试混合内容转换"""
+        result = OpenAIResponsesConverter._convert_chat_content_to_responses([
+            {"type": "text", "text": "Describe this"},
+            {"type": "image_url", "image_url": {"url": "https://example.com/img.png"}},
+        ])
+        assert len(result) == 2
+        assert result[0]["type"] == "input_text"
+        assert result[1]["type"] == "input_image"
+
+    def test_chat_to_responses_multimodal(self):
+        """测试 Chat 多模态消息完整转换为 Responses 格式"""
+        chat_request = {
+            "model": "gpt-4o",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "What's in this image?"},
+                        {"type": "image_url", "image_url": {"url": "https://example.com/cat.png"}}
+                    ]
+                }
+            ]
+        }
+        result = OpenAIResponsesConverter.from_openai_chat_request(chat_request)
+        assert isinstance(result["input"], list)
+        assert result["input"][0]["type"] == "message"
+        content = result["input"][0]["content"]
+        assert any(c["type"] == "input_text" for c in content)
+        assert any(c["type"] == "input_image" for c in content)
+
+
+class TestAnthropicOutputFormat:
+    """测试 Anthropic output_format 参数映射"""
+
+    def test_anthropic_output_format_json_schema_to_chat(self):
+        """测试 Anthropic output_format json_schema 映射到 Chat response_format"""
+        request = {
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "output_format": {
+                "type": "json_schema",
+                "name": "my_schema",
+                "schema": {"type": "object", "properties": {"name": {"type": "string"}}},
+                "strict": True
+            }
+        }
+        result = AnthropicConverter.to_openai_chat(request)
+        assert "response_format" in result
+        assert result["response_format"]["type"] == "json_schema"
+        assert result["response_format"]["json_schema"]["name"] == "my_schema"
+        assert result["response_format"]["json_schema"]["strict"] is True
+
+    def test_anthropic_output_format_json_object_to_chat(self):
+        """测试 Anthropic output_format json_object 映射"""
+        request = {
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "output_format": {"type": "json_object"}
+        }
+        result = AnthropicConverter.to_openai_chat(request)
+        assert result["response_format"] == {"type": "json_object"}
+
+    def test_chat_response_format_to_anthropic_output_format(self):
+        """测试 Chat response_format 映射到 Anthropic output_format"""
+        chat_request = {
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "test_schema", "schema": {"type": "object"}, "strict": True}
+            }
+        }
+        config = ConverterConfig(backend_type="anthropic")
+        engine = ProtocolConverterEngine(config)
+        result = engine._chat_to_anthropic_request(chat_request)
+
+        assert "output_format" in result
+        assert result["output_format"]["type"] == "json_schema"
+        assert result["output_format"]["name"] == "test_schema"
+        assert result["output_format"]["strict"] is True
+
+    def test_responses_text_format_to_anthropic_output_format(self):
+        """测试 Responses text.format 映射到 Anthropic output_format"""
+        request = {
+            "model": "gpt-4o",
+            "input": "Hello",
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "my_output",
+                    "schema": {"type": "object", "properties": {"result": {"type": "string"}}}
+                }
+            }
+        }
+        result = OpenAIResponsesConverter.to_anthropic_request(request)
+        assert "output_format" in result
+        assert result["output_format"]["type"] == "json_schema"
+        assert result["output_format"]["name"] == "my_output"
+
+    def test_detect_anthropic_with_output_format(self):
+        """测试带 output_format 的请求检测为 Anthropic"""
+        request = {
+            "model": "my-model",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "output_format": {"type": "json_schema", "name": "test"}
+        }
+        assert ProtocolDetector.detect(request) == Protocol.ANTHROPIC
+
+
+class TestResponsesIncompleteEvent:
+    """测试 Responses API response.incomplete 流式事件"""
+
+    def test_incomplete_event_on_length(self):
+        """测试 finish_reason=length 生成 response.incomplete 事件"""
+        OpenAIResponsesConverter.reset_stream_state()
+        # 先发 start 事件
+        start_chunk = {
+            "id": "resp_123",
+            "model": "gpt-4o",
+            "choices": [{"delta": {"role": "assistant"}, "index": 0}]
+        }
+        OpenAIResponsesConverter.convert_stream_chunk(start_chunk)
+
+        # 发 length 结束事件
+        end_chunk = {
+            "id": "resp_123",
+            "model": "gpt-4o",
+            "choices": [{"delta": {}, "finish_reason": "length", "index": 0}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 100, "total_tokens": 110}
+        }
+        events = OpenAIResponsesConverter.convert_stream_chunk(end_chunk)
+
+        # 应该包含 response.incomplete 事件
+        event_types = [e.get("type") for e in events]
+        assert "response.incomplete" in event_types
+
+    def test_completed_event_on_stop(self):
+        """测试 finish_reason=stop 生成 response.completed 事件"""
+        OpenAIResponsesConverter.reset_stream_state()
+        start_chunk = {
+            "id": "resp_123",
+            "model": "gpt-4o",
+            "choices": [{"delta": {"role": "assistant"}, "index": 0}]
+        }
+        OpenAIResponsesConverter.convert_stream_chunk(start_chunk)
+
+        end_chunk = {
+            "id": "resp_123",
+            "model": "gpt-4o",
+            "choices": [{"delta": {}, "finish_reason": "stop", "index": 0}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        }
+        events = OpenAIResponsesConverter.convert_stream_chunk(end_chunk)
+
+        event_types = [e.get("type") for e in events]
+        assert "response.completed" in event_types

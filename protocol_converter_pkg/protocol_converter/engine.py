@@ -549,8 +549,26 @@ class ProtocolConverterEngine:
             extra["seed"] = request["seed"]
         if request.get("n") is not None and request["n"] != 1:
             extra["n"] = request["n"]
-        if request.get("response_format") is not None:
-            extra["response_format"] = request["response_format"]
+        # response_format → Anthropic output_format (结构化输出映射)
+        # Chat: {"type": "json_schema", "json_schema": {"name": "...", "schema": {...}}}
+        # Anthropic: {"type": "json_schema", "name": "...", "schema": {...}}
+        response_format = request.get("response_format")
+        if response_format and isinstance(response_format, dict):
+            fmt_type = response_format.get("type", "")
+            if fmt_type == "json_schema":
+                json_schema = response_format.get("json_schema", {})
+                output_format = {"type": "json_schema"}
+                if json_schema.get("name"):
+                    output_format["name"] = json_schema["name"]
+                if json_schema.get("schema"):
+                    output_format["schema"] = json_schema["schema"]
+                if json_schema.get("strict") is not None:
+                    output_format["strict"] = json_schema["strict"]
+                anthropic_request["output_format"] = output_format
+            elif fmt_type == "json_object":
+                anthropic_request["output_format"] = {"type": "json_object"}
+            # 保留原始 response_format 在 extra_body 中以兼容后端
+            extra["response_format"] = response_format
         if request.get("logprobs") is not None:
             extra["logprobs"] = request["logprobs"]
         if request.get("top_logprobs") is not None:
