@@ -545,7 +545,58 @@ python3 examples/integration_test_all_9_paths.py
 - [openai-python SDK](https://github.com/openai/openai-python)
 - [anthropic-sdk-python](https://github.com/anthropics/anthropic-sdk-python)
 
+## 版本信息
+
+| 版本 | 日期 | 说明 |
+|------|------|------|
+| **v1.24.0** | 2026-05-17 | 6 轮深度审查修复：`minimal` 推理映射修正、`redacted_thinking` 往返转换、空 input 容错、`stop` 空值过滤、工具 `input_schema` 默认值 |
+| v1.23.0 | — | 6 轮审查修复：`reasoning_effort` 映射、`output_format` 逆向映射、`service_tier` 映射、流式 reasoning 转换等 |
+| v1.17.0 | — | 3 轮审查修复：`text.verbosity` 双向映射、`generate_summary` 往返、`cache_control` 保留等 |
+| v1.0.0 | — | 初始版本：9 路转换矩阵、流式 SSE、工具调用、多模态支持 |
+
+**当前版本**：`1.24.0`（同步更新于 `pyproject.toml` 和 `protocol_converter/__init__.py`）
+
+**核心依赖**：
+- Python ≥ 3.9
+- httpx ≥ 0.25.0（可选，用于 `convert_and_forward` 转发请求）
+- pytest ≥ 7.0.0 + pytest-asyncio ≥ 0.21.0（开发依赖，用于测试）
+
+**测试执行**：
+
+```bash
+# 单元测试（354 个测试用例）
+cd protocol_converter_pkg
+PYTHONPATH=. python3 -m pytest tests/test_protocol_converter.py -v
+
+# 集成测试（9 路全量，需要网络访问和 API Key）
+PYTHONPATH=. python3 examples/integration_test_all_9_paths.py
+
+# 单后端集成测试
+PYTHONPATH=. python3 examples/integration_test_chat_backend.py
+PYTHONPATH=. python3 examples/integration_test_anthropic_backend.py
+PYTHONPATH=. python3 examples/integration_test_responses_backend.py
+```
+
 ## 更新日志
+
+### v1.24.0
+
+基于 OpenAI Python SDK v2.11、Anthropic SDK 最新规范及 Context7 文档交叉验证，执行 6 轮深度审查修复：
+
+**协议解析与字段映射修复：**
+- **`reasoning_effort="minimal"` 映射修正**：原映射 `budget=0` → `thinking.disabled`（语义错误），修正为 `budget=1024` → `thinking.enabled`，与 Anthropic 最小可用 budget 一致。影响文件：`engine.py`、`openai_responses.py`
+- **`redacted_thinking` 往返转换支持**：Anthropic `redacted_thinking` → Chat `[redacted_thinking: data]` 格式 → 恢复为 `redacted_thinking` 块，实现脱敏思考内容的完整往返转换。影响文件：`engine.py`、`anthropic.py`、`openai_responses.py`
+- **Responses `encrypted_content` 传递**：当 `reasoning` 输出项仅含 `encrypted_content` 无可见文本时，正确标记为 `[redacted_thinking: ...]` 格式传递至 Chat 格式
+
+**异常处理与边界条件修复：**
+- **空 `input` 容错**：Responses `input=[]`、`input=""` 不再产生无效请求，自动填充空用户消息。影响路径：`to_openai_chat`、`to_anthropic_request`、`from_openai_chat_request`
+- **空 `messages` 容错**：Chat→Anthropic 转换时空消息列表自动补充空用户消息
+- **`stop=[]`/`stop=""` 过滤**：空停止序列不再传递给 Anthropic `stop_sequences`（原代码会将空列表传入）
+- **`max_completion_tokens=0` 支持**：正确映射为 Anthropic `max_tokens=0`（缓存预热场景），已使用 `is not None` 判断
+
+**数据类型转换修复：**
+- **Anthropic 工具 `input_schema` 缺失默认值**：原代码条件性添加 `parameters`，修正为始终提供默认值 `{"type": "object", "properties": {}}`，符合 Anthropic SDK 规范
+- **新增 7 个单元测试**覆盖以上修复场景（总计 354 个测试用例，全部通过）
 
 ### v1.23.0
 

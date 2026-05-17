@@ -159,7 +159,10 @@ class OpenAIResponsesConverter:
         input_data = request.get("input", [])
         if isinstance(input_data, str):
             # 简单字符串输入 -> 单条 user 消息
-            messages.append({"role": "user", "content": input_data})
+            if input_data:
+                messages.append({"role": "user", "content": input_data})
+            else:
+                messages.append({"role": "user", "content": ""})
         elif isinstance(input_data, list):
             for item in input_data:
                 msg = cls._convert_input_item_to_message(item)
@@ -169,6 +172,10 @@ class OpenAIResponsesConverter:
                         messages.extend(msg)
                     else:
                         messages.append(msg)
+        
+        # 确保 messages 不为空（Chat API 要求至少一条消息）
+        if not messages:
+            messages.append({"role": "user", "content": ""})
         
         # 2. 处理 instructions（相当于 system/developer prompt）
         # instructions 可以是字符串或 ResponseInputItem 数组
@@ -1014,6 +1021,9 @@ class OpenAIResponsesConverter:
                         "content": [{"type": "input_text", "text": str(content)}]
                     })
             input_data = input_items
+            # 确保 input_items 不为空
+            if not input_data:
+                input_data = [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": ""}]}]
         else:
             input_data = ""
         
@@ -1198,7 +1208,10 @@ class OpenAIResponsesConverter:
         # 1. 处理 input
         input_data = request.get("input", [])
         if isinstance(input_data, str):
-            anthropic_messages.append({"role": "user", "content": input_data})
+            if input_data:
+                anthropic_messages.append({"role": "user", "content": input_data})
+            else:
+                anthropic_messages.append({"role": "user", "content": ""})
         elif isinstance(input_data, list):
             for item in input_data:
                 msg = cls._convert_input_item_to_anthropic(item)
@@ -1207,6 +1220,10 @@ class OpenAIResponsesConverter:
                         anthropic_messages.extend(msg)
                     else:
                         anthropic_messages.append(msg)
+        
+        # 确保 messages 不为空（Anthropic API 要求至少一条消息）
+        if not anthropic_messages:
+            anthropic_messages.append({"role": "user", "content": ""})
         
         # 2. 处理 instructions → system
         system_prompt = None
@@ -1295,7 +1312,7 @@ class OpenAIResponsesConverter:
             if effort:
                 effort_budget_map = {
                     "none": 0,
-                    "minimal": 0,
+                    "minimal": 1024,
                     "low": 1024,
                     "medium": 10000,
                     "high": 32000,
@@ -1959,6 +1976,9 @@ class OpenAIResponsesConverter:
                             reasoning_texts.append(text)
                 if reasoning_texts:
                     reasoning_content = "\n".join(reasoning_texts)
+                elif item.get("encrypted_content"):
+                    # 仅含 encrypted_content 无可见文本 → 标记为 redacted_thinking 以便往返转换
+                    reasoning_content = f"[redacted_thinking: {item['encrypted_content']}]"
             
             elif item_type == "function_call":
                 tool_calls.append({

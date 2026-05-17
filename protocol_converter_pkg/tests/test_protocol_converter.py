@@ -1314,7 +1314,8 @@ class TestEngineNewFeatures:
         result = engine.convert_request(chat_request)
         
         assert "thinking" in result
-        assert result["thinking"]["type"] == "disabled"
+        assert result["thinking"]["type"] == "enabled"
+        assert result["thinking"]["budget_tokens"] == 1024
 
     def test_anthropic_response_with_thinking(self):
         """测试 Anthropic 响应中 thinking 块转换为 reasoning_content"""
@@ -6681,3 +6682,136 @@ class TestEngineReverseModelMapping:
 
         data_chunks = [c for c in chunks if '[DONE]' not in c]
         assert any(c.startswith('event: response.output_text.delta') for c in data_chunks)
+
+
+# ============================================================
+# 新增测试 - 修复验证
+# ============================================================
+
+
+class TestBugFixes:
+    """修复验证测试"""
+
+    def test_reasoning_effort_minimal_maps_to_enabled_1024(self):
+        """reasoning_effort='minimal' 应映射为 thinking enabled budget=1024，而非 disabled"""
+        config = ConverterConfig(backend_type="anthropic")
+        engine = ProtocolConverterEngine(config)
+        
+        chat_request = {
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "reasoning_effort": "minimal"
+        }
+        
+        result = engine.convert_request(chat_request)
+        assert result["thinking"]["type"] == "enabled"
+        assert result["thinking"]["budget_tokens"] == 1024
+
+    def test_redacted_thinking_roundtrip_anthropic_to_chat_to_anthropic(self):
+        """redacted_thinking 块应能通过 Chat 格式往返转换"""
+        anthropic_response = {
+            "id": "msg_test",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "redacted_thinking", "data": "abc123encrypted"},
+                {"type": "text", "text": "Hello"}
+            ],
+            "model": "claude-sonnet-4-20250514",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        }
+        
+        config = ConverterConfig(backend_type="anthropic")
+        engine = ProtocolConverterEngine(config)
+        chat_response = engine.convert_response(anthropic_response, Protocol.OPENAI_CHAT)
+        
+        assert chat_response["choices"][0]["message"]["reasoning_content"] == "[redacted_thinking: abc123encrypted]"
+        
+        anthropic_back = AnthropicConverter.from_openai_chat(chat_response)
+        has_redacted = any(b["type"] == "redacted_thinking" for b in anthropic_back["content"])
+        assert has_redacted, "redacted_thinking 块应在 Chat→Anthropic 转换中恢复"
+        redacted_block = next(b for b in anthropic_back["content"] if b["type"] == "redacted_thinking")
+        assert redacted_block["data"] == "abc123encrypted"
+
+    def test_redacted_thinking_roundtrip_responses_to_chat_to_anthropic(self):
+        """Responses reasoning 的 encrypted_content 应能通过 Chat 格式往返转换"""
+        responses_response = {
+            "id": "resp_test",
+            "object": "response",
+            "status": "completed",
+            "created_at": 1234567890,
+            "model": "gpt-4o",
+            "output": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_test",
+                    "content": [],
+                    "summary": [],
+                    "encrypted_content": "xyz789encrypted",
+                    "status": "completed"
+                },
+                {
+                    "type": "message",
+                    "id": "msg_test",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "Hello"}]
+                }
+            ],
+            "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+        }
+        
+        chat_response = OpenAIResponsesConverter.to_chat_response(responses_response)
+        assert chat_response["choices"][0]["message"]["reasoning_content"] == "[redacted_thinking: xyz789encrypted]"
+        
+        anthropic_result = AnthropicConverter.from_openai_chat(chat_response)
+        has_redacted = any(b["type"] == "redacted_thinking" for b in anthropic_result["content"])
+        assert has_redacted
+
+    def test_empty_input_responses_to_chat(self):
+        """空 input 不应导致无效的 Chat 请求"""
+        request = {
+            "model": "gpt-4o",
+            "input": [],
+        }
+        result = OpenAIResponsesConverter.to_openai_chat(request)
+        assert len(result["messages"]) > 0
+        assert result["messages"][-1]["role"] == "user"
+
+    def test_empty_input_responses_to_anthropic(self):
+        """空 input 不应导致无效的 Anthropic 请求"""
+        request = {
+            "model": "gpt-4o",
+            "input": [],
+        }
+        result = OpenAIResponsesConverter.to_anthropic_request(request)
+        assert len(result["messages"]) > 0
+
+    def test_stop_empty_list_not_passed_to_anthropic(self):
+        """stop=[] 不应传给 Anthropic stop_sequences"""
+        config = ConverterConfig(backend_type="anthropic")
+        engine = ProtocolConverterEngine(config)
+        
+        chat_request = {
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop": []
+        }
+        
+        result = engine.convert_request(chat_request)
+        assert "stop_sequences" not in result
+
+    def test_stop_empty_string_not_passed_to_anthropic(self):
+        """stop=\"\" 不应传给 Anthropic stop_sequences"""
+        config = ConverterConfig(backend_type="anthropic")
+        engine = ProtocolConverterEngine(config)
+        
+        chat_request = {
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop": ""
+        }
+        
+        result = engine.convert_request(chat_request)
+        assert "stop_sequences" not in result

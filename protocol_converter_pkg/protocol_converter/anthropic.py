@@ -671,8 +671,8 @@ class AnthropicConverter:
                     "description": tool.get("description", ""),
                 }
                 # Anthropic 用 input_schema, OpenAI 用 parameters
-                if "input_schema" in tool:
-                    func_def["parameters"] = tool["input_schema"]
+                # Anthropic SDK: input_schema 是必填字段，但防御性处理缺失情况
+                func_def["parameters"] = tool.get("input_schema", {"type": "object", "properties": {}})
                 converted.append({
                     "type": "function",
                     "function": func_def
@@ -758,14 +758,24 @@ class AnthropicConverter:
             tool_calls = message.get("tool_calls", [])
             reasoning_content = message.get("reasoning_content")
             
-            # 处理推理内容 -> thinking 块 (必须在文本块之前)
+            # 处理推理内容 -> thinking/redacted_thinking 块 (必须在文本块之前)
             # Anthropic SDK: ThinkingBlock 必须包含 thinking + signature 字段
             if reasoning_content:
-                content_blocks.append({
-                    "type": "thinking",
-                    "thinking": reasoning_content,
-                    "signature": "",  # Chat API 不提供 signature，设为空字符串
-                })
+                # 检测 [redacted_thinking: ...] 格式，恢复为 redacted_thinking 块
+                if (isinstance(reasoning_content, str) 
+                        and reasoning_content.startswith("[redacted_thinking: ") 
+                        and reasoning_content.endswith("]")):
+                    redacted_data = reasoning_content[20:-1]
+                    content_blocks.append({
+                        "type": "redacted_thinking",
+                        "data": redacted_data,
+                    })
+                else:
+                    content_blocks.append({
+                        "type": "thinking",
+                        "thinking": reasoning_content,
+                        "signature": "",  # Chat API 不提供 signature，设为空字符串
+                    })
             
             # 处理文本内容（空字符串 "" 也是有效内容，有别于 None）
             if content is not None:

@@ -478,15 +478,25 @@ class ProtocolConverterEngine:
                                 if text:
                                     assistant_content.append({"type": "text", "text": text})
                 
-                # 处理 reasoning_content -> thinking 块
+                # 处理 reasoning_content -> thinking/redacted_thinking 块
                 # Anthropic SDK: ThinkingBlock 必须包含 thinking + signature 字段
                 reasoning_content = msg.get("reasoning_content")
                 if reasoning_content:
-                    assistant_content.insert(0, {
-                        "type": "thinking",
-                        "thinking": reasoning_content,
-                        "signature": "",  # Chat API 不提供 signature，设为空字符串
-                    })
+                    # 检测 [redacted_thinking: ...] 格式，恢复为 redacted_thinking 块
+                    if (isinstance(reasoning_content, str) 
+                            and reasoning_content.startswith("[redacted_thinking: ") 
+                            and reasoning_content.endswith("]")):
+                        redacted_data = reasoning_content[20:-1]  # 去掉 "[redacted_thinking: " 和 "]"
+                        assistant_content.insert(0, {
+                            "type": "redacted_thinking",
+                            "data": redacted_data,
+                        })
+                    else:
+                        assistant_content.insert(0, {
+                            "type": "thinking",
+                            "thinking": reasoning_content,
+                            "signature": "",  # Chat API 不提供 signature，设为空字符串
+                        })
                 
                 # 转换 tool_calls
                 tool_calls = msg.get("tool_calls", [])
@@ -588,6 +598,10 @@ class ProtocolConverterEngine:
                         "content": anthropic_content
                     })
         
+        # 确保 anthropic_messages 不为空（Anthropic API 要求至少一条消息）
+        if not anthropic_messages:
+            anthropic_messages.append({"role": "user", "content": ""})
+        
         # 构建 Anthropic 请求
         anthropic_request = {
             "model": request.get("model") or "claude-sonnet-4-20250514",
@@ -612,11 +626,11 @@ class ProtocolConverterEngine:
             anthropic_request["temperature"] = request["temperature"]
         if request.get("top_p") is not None:
             anthropic_request["top_p"] = request["top_p"]
-        if request.get("stop"):
+        if request.get("stop") is not None:
             stop_val = request["stop"]
-            if isinstance(stop_val, list):
+            if isinstance(stop_val, list) and stop_val:
                 anthropic_request["stop_sequences"] = stop_val
-            else:
+            elif isinstance(stop_val, str) and stop_val:
                 anthropic_request["stop_sequences"] = [stop_val]
         
         # metadata 合并（请求中的 metadata 可能已有其他字段）
@@ -679,7 +693,7 @@ class ProtocolConverterEngine:
         if reasoning_effort:
             effort_budget_map = {
                 "none": 0,
-                "minimal": 0,
+                "minimal": 1024,
                 "low": 1024,
                 "medium": 10000,
                 "high": 32000,
