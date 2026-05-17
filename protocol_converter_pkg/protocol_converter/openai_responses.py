@@ -2175,8 +2175,19 @@ class OpenAIResponsesConverter:
             if item_type == "reasoning":
                 # reasoning 输出项 → thinking 块或 redacted_thinking 块
                 encrypted_content = item.get("encrypted_content")
-                
-                if encrypted_content and not item.get("content"):
+
+                # 检查是否有可见的推理内容
+                content = item.get("content", [])
+                summary = item.get("summary", [])
+                has_visible_content = any(
+                    c.get("type") == "reasoning_text" and c.get("text")
+                    for c in content
+                ) or any(
+                    s.get("type") == "summary_text" and s.get("text")
+                    for s in summary
+                )
+
+                if encrypted_content and not has_visible_content:
                     # 仅含 encrypted_content，无可见内容 → redacted_thinking
                     content_blocks.append({
                         "type": "redacted_thinking",

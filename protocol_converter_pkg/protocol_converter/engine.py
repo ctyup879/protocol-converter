@@ -708,12 +708,18 @@ class ProtocolConverterEngine:
         # 如果请求中直接包含 thinking 参数（从 Anthropic 转换过来的），优先使用
         elif isinstance(request.get("extra_body"), dict) and isinstance(request["extra_body"].get("thinking"), dict):
             original_thinking = request["extra_body"]["thinking"]
-            # 只有当 type 是 enabled 或 adaptive 时才恢复
-            if original_thinking.get("type") in ("enabled", "adaptive"):
+            # enabled 或 adaptive 时恢复（adaptive 无 budget_tokens）
+            if original_thinking.get("type") == "enabled":
                 thinking_config = {
-                    "type": original_thinking["type"],
+                    "type": "enabled",
                     "budget_tokens": original_thinking.get("budget_tokens", 10000),
                 }
+                if original_thinking.get("display"):
+                    thinking_config["display"] = original_thinking["display"]
+                anthropic_request["thinking"] = thinking_config
+            elif original_thinking.get("type") == "adaptive":
+                # adaptive 类型直接恢复，不添加 budget_tokens
+                thinking_config = {"type": "adaptive"}
                 if original_thinking.get("display"):
                     thinking_config["display"] = original_thinking["display"]
                 anthropic_request["thinking"] = thinking_config
@@ -902,8 +908,12 @@ class ProtocolConverterEngine:
                 if thinking_text:
                     reasoning_content = thinking_text
             elif block.get("type") == "redacted_thinking":
-                # 脱敏思考块 - 跳过（Chat API 无对应字段）
-                pass
+                # 脱敏思考块 - 保留 data 字段用于往返转换
+                # Chat API 无等价字段，但可保留在 reasoning_content 中
+                data = block.get("data") or block.get("signature", "")
+                if data:
+                    # 标记为脱敏思考内容，后续转换时可恢复
+                    reasoning_content = f"[redacted_thinking: {data}]"
             elif block.get("type") == "tool_use":
                 tool_calls.append({
                     "id": block.get("id", f"call_{uuid.uuid4().hex[:24]}"),
