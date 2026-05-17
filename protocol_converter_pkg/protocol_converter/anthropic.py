@@ -337,7 +337,13 @@ class AnthropicConverter:
                     text_block["cache_control"] = block["cache_control"]
                 content_parts.append(text_block)
             else:
+                # 非 text 类型 system 块降级为文本占位，避免静默丢弃
                 has_complex = True
+                placeholder = block.get("text", "")
+                if not placeholder:
+                    placeholder = f"[{block_type}]"
+                text_parts.append(placeholder)
+                content_parts.append({"type": "text", "text": placeholder})
         
         if has_complex:
             return content_parts if content_parts else None
@@ -378,6 +384,8 @@ class AnthropicConverter:
             has_multimodal = False
             
             for block in content:
+                if not isinstance(block, dict):
+                    continue
                 block_type = block.get("type", "")
                 
                 if block_type == "text":
@@ -522,12 +530,8 @@ class AnthropicConverter:
             if role == "assistant":
                 assistant_msg = {"role": "assistant"}
                 if has_multimodal and content_parts:
-                    # 多模态内容
-                    text_content_parts = [p for p in content_parts if p.get("type") == "text"]
-                    if text_content_parts:
-                        assistant_msg["content"] = "\n".join(p.get("text", "") for p in text_content_parts)
-                    else:
-                        assistant_msg["content"] = None
+                    # 多模态内容：保留完整 content_parts 数组（含 text / image_url / file）
+                    assistant_msg["content"] = content_parts
                 elif text_parts:
                     assistant_msg["content"] = "\n".join(text_parts)
                 else:
@@ -615,6 +619,9 @@ class AnthropicConverter:
         Anthropic 服务器工具: {"type": "bash_20250124", ...}, {"type": "web_search_20250305", ...} 等
         OpenAI: {"type": "function", "function": {"name", "description", "parameters"}}
         """
+        if not isinstance(tools, list):
+            return []
+        
         # Anthropic 服务器工具类型 (type 格式: name_YYYYMMDD)
         ANTHROPIC_SERVER_TOOL_PREFIXES = (
             "bash_", "text_editor_", "code_execution_",
@@ -720,6 +727,8 @@ class AnthropicConverter:
                 stop_details = {"reason": "content_policy", "message": str(error)}
         
         for choice in choices:
+            if not isinstance(choice, dict):
+                continue
             message = choice.get("message", {})
             content = message.get("content")
             tool_calls = message.get("tool_calls", [])
@@ -747,11 +756,13 @@ class AnthropicConverter:
             
             # 处理工具调用
             for tc in tool_calls:
+                if not isinstance(tc, dict):
+                    continue
                 tc_id = tc.get("id", f"toolu_{uuid.uuid4().hex[:24]}")
                 func = tc.get("function", {})
-                args_str = func.get("arguments", "{}")
+                args_val = func.get("arguments", "{}")
                 try:
-                    args_obj = json.loads(args_str)
+                    args_obj = json.loads(args_val) if isinstance(args_val, str) else args_val
                 except (json.JSONDecodeError, TypeError):
                     args_obj = {}
                 
@@ -1366,6 +1377,8 @@ class AnthropicConverter:
         content = response.get("content", [])
         
         for block in content:
+            if not isinstance(block, dict):
+                continue
             block_type = block.get("type")
             
             if block_type == "thinking":

@@ -557,6 +557,33 @@ python3 examples/integration_test_all_9_paths.py
 
 ## 更新日志
 
+### v1.20.0
+
+基于官方文档、Context7 实时检索和 Python SDK（`openai-python` v2.11、`anthropic-sdk-python`）进行第3轮深度审查后修复异常处理遗漏与类型安全缺陷：
+
+**第1轮 — 协议解析与字段映射逻辑缺陷：**
+
+- **`_convert_system_blocks` 非 text 类型 system 块降级保留**：Anthropic→Chat 转换中，system 消息的 `thinking`/`image` 等非 text 类型块之前被静默丢弃（仅设置 `has_complex=True` 但不处理内容）。现降级为文本占位 `[block_type]` 追加到 text_parts 和 content_parts，避免内容丢失
+
+- **`_convert_message` assistant 多模态内容完整保留**：Anthropic→Chat 转换中，assistant 消息同时含 text 和 image_url/file 等多模态块时，之前错误地将 `content_parts` 数组降级为纯文本字符串或置为 None，导致多模态内容丢失。现保留完整 `content_parts` 数组
+
+**第2轮 — 异常处理遗漏与边界条件漏洞：**
+
+- **`_convert_tools` 类型防护修复**：`tools` 参数若返回 `None`（请求中显式设为 `null`），直接迭代 `None` 会抛出 `TypeError`。现添加 `if not isinstance(tools, list): return []` 防护
+
+- **`from_openai_chat` choice/tool_calls 元素防护修复**：Chat 响应 `choices` 列表中若含非字典元素，`choice.get("message", {})` 返回 `None` 后调用 `.get()` 会抛出 `AttributeError`。现添加 `if not isinstance(choice, dict): continue` 和 `if not isinstance(tc, dict): continue` 防护
+
+- **`to_openai_responses` content 块元素防护修复**：Chat 响应 content 列表中若含非字典元素，`block.get("type")` 会抛出 `AttributeError`。现添加 `if not isinstance(block, dict): continue` 防护
+
+**第3轮 — 数据类型转换校验及交叉复查：**
+
+- **`_convert_message` content 列表块元素防护修复**：Anthropic 消息 content 列表中若含非字典元素，`block.get("type", "")` 会抛出 `AttributeError`。现添加 `if not isinstance(block, dict): continue` 防护
+
+**测试覆盖：**
+
+- 全部 347 个单元测试通过
+- 3×3 全量 9 路集成测试全部通过
+
 ### v1.19.0
 
 - **同协议快速路径优化**：`convert_request` 在源协议与目标后端协议一致时，若无需任何修改直接浅拷贝透传；仅需模型映射 / developer 降级 / extra_body 合并时只做最小修改，避免完整 deepcopy+转换的性能损耗
