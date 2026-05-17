@@ -279,11 +279,12 @@ class AnthropicConverter:
                 else:
                     chat_request["reasoning_effort"] = "low"
             elif thinking_type == "adaptive":
-                # adaptive 类型 - 模型自主决定推理深度
-                # Anthropic SDK: ThinkingConfigAdaptiveParam 仅有 type + display，但实现允许 budget_tokens
-                # 映射为对应级别，兼容用户的实际使用场景
+                # adaptive 类型 - Anthropic SDK 官方规范：ThinkingConfigAdaptiveParam 无 budget_tokens 字段
+                # 模型自主决定推理深度，默认 medium
+                # 注意：某些实现可能包含 budget_tokens，但这是非标准用法，不应在协议转换中依赖此行为
                 budget = thinking.get("budget_tokens")
                 if budget is not None:
+                    # 非标准用法：按 budget 值做最低级别映射（保守处理）
                     if budget >= 64000:
                         chat_request["reasoning_effort"] = "xhigh"
                     elif budget >= 32000:
@@ -293,7 +294,7 @@ class AnthropicConverter:
                     else:
                         chat_request["reasoning_effort"] = "low"
                 else:
-                    # adaptive 无 budget_tokens，默认 medium
+                    # adaptive 官方行为：模型自主决定，默认 medium
                     chat_request["reasoning_effort"] = "medium"
             elif thinking_type == "disabled":
                 chat_request["reasoning_effort"] = "none"

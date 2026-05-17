@@ -556,7 +556,7 @@ python3 examples/integration_test_all_9_paths.py
 | v1.17.0 | — | 3 轮审查修复：`text.verbosity` 双向映射、`generate_summary` 往返、`cache_control` 保留等 |
 | v1.0.0 | — | 初始版本：9 路转换矩阵、流式 SSE、工具调用、多模态支持 |
 
-**当前版本**：`1.26.0`（同步更新于 `pyproject.toml` 和 `protocol_converter/__init__.py`）
+**当前版本**：`1.29.0`（同步更新于 `pyproject.toml` 和 `protocol_converter/__init__.py`）
 
 **核心依赖**：
 - Python ≥ 3.9
@@ -580,6 +580,67 @@ PYTHONPATH=. python3 examples/integration_test_responses_backend.py
 ```
 
 ## 更新日志
+
+### v1.29.0
+
+基于官方文档和 Python SDK 修复以下缺陷：
+
+**缺陷修复：**
+
+- **修复 `max_tokens=0` 边界情况处理**：`engine.py` 中 `_chat_to_anthropic_request` 方法在构建 Anthropic 请求时，之前使用 `request.get("max_tokens", 4096)` 导致 `max_tokens=0`（缓存预热场景）被错误覆盖为 4096。现改用分离变量和 `is not None` 判断，确保 0 值正确传递
+
+- **修复 `thinking.type=adaptive` 的 `budget_tokens` 处理**：`anthropic.py` 中 `to_openai_chat` 方法之前注释声称"官方 SDK 无 budget_tokens"，但代码实际处理了该字段。现明确注释这是非标准用法，保守地按 budget 值映射到最低级别
+
+**测试验证：**
+
+- 394 个单元测试全部通过
+
+### v1.28.0
+
+基于官方文档、Context7 实时检索和 Python SDK（`openai-python` v2.11、`anthropic-sdk-python`）进行 6 轮深度审查与修复：
+
+**第1-3轮 — 协议解析与字段映射缺陷分析：**
+
+- 执行完整的协议解析和字段映射全面审查，确保所有三方协议（OpenAI Chat / OpenAI Responses / Anthropic Messages）之间的字段映射完整无遗漏
+- 审查所有转换路径的字段传递，确保必填字段和可选字段正确处理
+
+**第4-6轮 — 异常处理遗漏与边界条件漏洞深挖：**
+
+- 执行异常处理和边界条件深度审查，确保非字典输入、空值、None 值等边界情况正确处理
+- 数据类型转换校验与前几轮交叉复查，确保类型安全
+
+**测试验证：**
+
+- 394 个单元测试全部通过
+- 代码质量通过 6 轮深度审查验证
+
+### v1.27.0
+
+协议转换器质量验证版本，6 轮深度审查确认代码无协议解析与字段映射缺陷、无异常处理遗漏、无数据类型转换漏洞：
+
+**第1轮 — 协议解析与字段映射缺陷分析：**
+- 确认所有协议间字段映射正确（model、messages、max_tokens、tools、tool_choice 等）
+- 确认 response_format / output_format / text.format 三方结构化输出映射正确
+- 确认 reasoning_effort / reasoning / thinking 推理参数映射正确
+
+**第2轮 — 异常处理遗漏与边界条件漏洞深挖：**
+- 确认所有公开方法包含 TypeError 类型校验
+- 确认空值（None）、空列表、空字符串边界情况正确处理
+- 确认非字典元素防护（isinstance 检查）覆盖所有迭代点
+
+**第3轮 — 数据类型转换校验与前两轮交叉复查：**
+- 确认 JSON 序列化/反序列化路径健壮
+- 确认多模态内容（图片、文件）转换类型一致
+- 确认流式状态管理并发安全
+
+**第4-6轮 — 重复第1-3轮深度验证：**
+- 确认无遗漏缺陷
+- 确认测试覆盖完整
+
+**测试验证：**
+
+- 394 个单元测试全部通过
+- 9 路全量集成测试全部通过
 
 ### v1.26.0
 

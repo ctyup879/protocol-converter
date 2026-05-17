@@ -613,9 +613,12 @@ class ProtocolConverterEngine:
             anthropic_messages.append({"role": "user", "content": ""})
         
         # 构建 Anthropic 请求
+        # 注意：max_tokens=0 是有效值（仅预热缓存），必须使用 is not None 判断保留 0 值
+        max_completion = request.get("max_completion_tokens")
+        max_tok = request.get("max_tokens")
         anthropic_request = {
             "model": request.get("model") or "claude-sonnet-4-20250514",
-            "max_tokens": request.get("max_completion_tokens") if request.get("max_completion_tokens") is not None else request.get("max_tokens", 4096),
+            "max_tokens": max_completion if max_completion is not None else (max_tok if max_tok is not None else 4096),
             "messages": anthropic_messages,
         }
         
