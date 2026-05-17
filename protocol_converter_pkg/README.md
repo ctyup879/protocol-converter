@@ -515,13 +515,13 @@ cd /root/repos/ai-proxy/protocol_converter_pkg
 # 2. OpenAI Chat 后端集成测试（MiniMax API，8 项测试）
 python3 examples/integration_test_chat_backend.py
 
-# 3. Anthropic 兼容后端集成测试（MiniMax API，7 项测试）
+# 3. Anthropic 兼容后端集成测试（MiniMax API，9 项测试，含流式）
 python3 examples/integration_test_anthropic_backend.py
 
-# 4. OpenAI Responses 后端集成测试（OpenRouter API，7 项测试）
+# 4. OpenAI Responses 后端集成测试（OpenRouter API，9 项测试，含流式）
 python3 examples/integration_test_responses_backend.py
 
-# 5. 3×3 全量 9 路集成测试（覆盖所有协议 × 后端组合）
+# 5. 3×3 全量 9 路集成测试（覆盖所有协议 × 后端组合，非流式 + 流式）
 python3 examples/integration_test_all_9_paths.py
 ```
 
@@ -532,10 +532,10 @@ python3 examples/integration_test_all_9_paths.py
 | 测试类型 | 测试文件 | 测试数量 | 通过标准 |
 |---------|---------|---------|---------|
 | 单元测试 | `tests/test_protocol_converter.py` | 372 | 全部通过 |
-| Chat 后端集成测试 | `examples/integration_test_chat_backend.py` | 8 | 全部通过 |
-| Anthropic 后端集成测试 | `examples/integration_test_anthropic_backend.py` | 7 | 全部通过 |
-| Responses 后端集成测试 | `examples/integration_test_responses_backend.py` | 7 | 全部通过 |
-| 3×3 全量集成测试 | `examples/integration_test_all_9_paths.py` | 9 | 全部通过 |
+| Chat 后端集成测试 | `examples/integration_test_chat_backend.py` | 10 | 全部通过 |
+| Anthropic 后端集成测试 | `examples/integration_test_anthropic_backend.py` | 9 | 全部通过 |
+| Responses 后端集成测试 | `examples/integration_test_responses_backend.py` | 9 | 全部通过 |
+| 3×3 全量集成测试 | `examples/integration_test_all_9_paths.py` | 9 (非流式+流式) | 全部通过 |
 
 ## 参考
 
@@ -549,13 +549,14 @@ python3 examples/integration_test_all_9_paths.py
 
 | 版本 | 日期 | 说明 |
 |------|------|------|
+| **v1.26.0** | 2026-05-17 | 集成测试流式覆盖补全：4 个集成测试文件均补齐跨协议流式测试，9 路全量测试支持非流式+流式双模式 |
 | **v1.25.0** | 2026-05-17 | 7 项深度审查修复：instructions 顺序修正、redacted_thinking 往返转换完善、reasoning_content→Responses encrypted_content 映射、thinking.display→reasoning.summary 映射、user→metadata.user_id 映射、流式完成事件转换 |
 | v1.24.0 | — | 6 轮深度审查修复：`minimal` 推理映射修正、`redacted_thinking` 往返转换、空 input 容错、`stop` 空值过滤、工具 `input_schema` 默认值 |
 | v1.23.0 | — | 6 轮审查修复：`reasoning_effort` 映射、`output_format` 逆向映射、`service_tier` 映射、流式 reasoning 转换等 |
 | v1.17.0 | — | 3 轮审查修复：`text.verbosity` 双向映射、`generate_summary` 往返、`cache_control` 保留等 |
 | v1.0.0 | — | 初始版本：9 路转换矩阵、流式 SSE、工具调用、多模态支持 |
 
-**当前版本**：`1.25.0`（同步更新于 `pyproject.toml` 和 `protocol_converter/__init__.py`）
+**当前版本**：`1.26.0`（同步更新于 `pyproject.toml` 和 `protocol_converter/__init__.py`）
 
 **核心依赖**：
 - Python ≥ 3.9
@@ -579,6 +580,37 @@ PYTHONPATH=. python3 examples/integration_test_responses_backend.py
 ```
 
 ## 更新日志
+
+### v1.26.0
+
+集成测试流式覆盖补全，4 个集成测试文件均补齐跨协议流式测试，9 路全量测试支持非流式+流式双模式：
+
+**集成测试流式覆盖补全：**
+
+- **`integration_test_all_9_paths.py`**：9 条路径（3 协议 × 3 后端）均新增流式测试子项，每条路径报告 `(非流式=✓, 流式=✓)` 双模式结果
+  - 新增 `call_backend_stream()` 统一流式调用函数，自动适配 Chat/Responses/Anthropic 三种后端 SSE 格式
+  - Chat 后端：`data:` 行 + `choices[0].delta.content` 解析
+  - Responses 后端：`event:` + `data:` 行 + `response.output_text.delta` 解析
+  - Anthropic 后端：`event:` + `data:` 行 + `content_block_delta`/`text_delta` 解析
+
+- **`integration_test_chat_backend.py`**：新增 2 项跨协议流式测试（Responses→Chat 流式、Anthropic→Chat 流式），总计 10 项测试
+
+- **`integration_test_anthropic_backend.py`**：新增 2 项跨协议流式测试（Chat→Anthropic 流式、Responses→Anthropic 流式），总计 9 项测试
+
+- **`integration_test_responses_backend.py`**：新增 2 项跨协议流式测试（Chat→Responses 流式、Anthropic→Responses 流式），总计 9 项测试
+
+**流式测试修复：**
+
+- 修复所有跨协议流式测试中 `engine.convert_request()` 不自动映射 model 的问题，统一添加 `converted["model"] = CONFIG.default_model`
+- 修复 Responses 后端流式测试中错误响应体未输出导致难以调试的问题
+
+**测试验证：**
+
+- 372 个单元测试全部通过
+- 9 路全量集成测试全部通过（非流式+流式双模式）
+- Chat 后端集成测试 10 项全部通过
+- Anthropic 后端集成测试 9 项全部通过
+- Responses 后端集成测试 9 项全部通过
 
 ### v1.25.0
 

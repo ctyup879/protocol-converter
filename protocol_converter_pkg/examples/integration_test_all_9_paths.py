@@ -1,11 +1,13 @@
 """
-9 路全量集成测试 - 3 种协议请求 × 3 种后端
+9 路全量集成测试 - 3 种协议请求 × 3 种后端（非流式 + 流式）
 
 验证矩阵:
                     Chat后端    Responses后端    Anthropic后端
 Chat 请求:            ①            ②               ③
 Responses 请求:       ④            ⑤               ⑥
 Anthropic 请求:       ⑦            ⑧               ⑨
+
+每条路径同时测试非流式和流式两种模式。
 """
 
 import asyncio
@@ -128,7 +130,7 @@ def extract_text_from_anthropic_response(resp):
 
 async def call_backend(config, engine, request, target_protocol):
     """
-    通用后端调用: 转换请求 → 调用后端 → 转换响应
+    通用后端调用（非流式）: 转换请求 → 调用后端 → 转换响应
     
     Returns:
         (success, original_response, converted_response)
@@ -151,6 +153,88 @@ async def call_backend(config, engine, request, target_protocol):
         return True, result, converted_resp
 
 
+async def call_backend_stream(config, engine, request, target_protocol):
+    """
+    通用后端调用（流式）: 转换请求 → 调用后端流式 → 解析SSE → 提取文本
+    
+    Returns:
+        (success, full_text, event_types)
+    """
+    # 转换请求并设置 stream=True
+    converted_req = engine.convert_request(request)
+    converted_req["stream"] = True
+    
+    # 对 Chat 后端添加 stream_options
+    if config.backend_type == "openai" and "stream_options" not in converted_req:
+        converted_req["stream_options"] = {"include_usage": True}
+    
+    headers = {"Content-Type": "application/json", **config.get_auth_headers()}
+    full_text = ""
+    event_types = set()
+    
+    try:
+        async with httpx.AsyncClient(timeout=config.timeout) as client:
+            async with client.stream("POST", config.backend_url, headers=headers, json=converted_req) as response:
+                if response.status_code != 200:
+                    return False, "", set()
+                
+                pending_event_type = None
+                async for line in response.aiter_lines():
+                    line = line.strip()
+                    if not line or line.startswith(":"):
+                        continue
+                    
+                    # 处理 event: 行
+                    if line.startswith("event:"):
+                        pending_event_type = line[6:].strip()
+                        continue
+                    
+                    if line.startswith("data:"):
+                        data_str = line[5:].strip()
+                        if data_str == "[DONE]":
+                            break
+                        
+                        current_event_type = pending_event_type
+                        pending_event_type = None
+                        
+                        try:
+                            chunk = json.loads(data_str)
+                            
+                            # Anthropic 后端 SSE
+                            if config.backend_type == "anthropic":
+                                evt_type = current_event_type or chunk.get("type", "")
+                                event_types.add(evt_type)
+                                if evt_type == "content_block_delta":
+                                    delta = chunk.get("delta", {})
+                                    if delta.get("type") == "text_delta":
+                                        full_text += delta.get("text", "")
+                            
+                            # Responses 后端 SSE
+                            elif config.backend_type == "openai_responses":
+                                evt_type = current_event_type or chunk.get("type", "")
+                                event_types.add(evt_type)
+                                if evt_type == "response.output_text.delta":
+                                    full_text += chunk.get("delta", "")
+                            
+                            # Chat 后端 SSE
+                            else:
+                                chunk_type = chunk.get("object", "")
+                                event_types.add(chunk_type)
+                                choices = chunk.get("choices", [])
+                                if choices:
+                                    delta = choices[0].get("delta", {})
+                                    content = delta.get("content", "")
+                                    if content:
+                                        full_text += content
+                        except (json.JSONDecodeError, KeyError, IndexError):
+                            pass
+        
+        return True, full_text, event_types
+    except Exception as e:
+        print(f"    流式异常: {e}")
+        return False, "", set()
+
+
 # ============================================================
 # ① Chat 请求 → Chat 后端
 # ============================================================
@@ -160,22 +244,42 @@ async def test_chat_to_chat():
     print("① Chat 请求 → Chat 后端")
     print("=" * 60)
     
+    # 非流式
     try:
         success, raw, resp = await call_backend(
             CHAT_CONFIG, engine_chat, CHAT_REQUEST, Protocol.OPENAI_CHAT
         )
         if not success:
-            print(f"  ✗ 失败: {resp}")
-            return False
-        text = extract_text_from_chat_response(resp)
-        print(f"  请求: Chat ({len(CHAT_REQUEST['messages'])} messages)")
-        print(f"  后端: Chat (直通)")
-        print(f"  响应: {text[:100]}")
-        print(f"  ✓ 通过" if text else "  ✗ 无文本")
-        return bool(text)
+            print(f"  ✗ 非流式失败: {resp}")
+            non_stream_ok = False
+        else:
+            text = extract_text_from_chat_response(resp)
+            print(f"  [非流式] 请求: Chat → Chat (直通)")
+            print(f"  [非流式] 响应: {text[:100]}")
+            non_stream_ok = bool(text)
     except Exception as e:
-        print(f"  ✗ 异常: {e}")
-        return False
+        print(f"  ✗ 非流式异常: {e}")
+        non_stream_ok = False
+    
+    # 流式
+    try:
+        success, full_text, event_types = await call_backend_stream(
+            CHAT_CONFIG, engine_chat, CHAT_REQUEST, Protocol.OPENAI_CHAT
+        )
+        if not success:
+            print(f"  ✗ 流式失败")
+            stream_ok = False
+        else:
+            print(f"  [流式]   请求: Chat → Chat (直通)")
+            print(f"  [流式]   响应: {full_text[:100]}")
+            print(f"  [流式]   事件: {sorted(event_types)}")
+            stream_ok = bool(full_text)
+    except Exception as e:
+        print(f"  ✗ 流式异常: {e}")
+        stream_ok = False
+    
+    print(f"  {'✓ 通过' if non_stream_ok and stream_ok else '✗ 失败'} (非流式={'✓' if non_stream_ok else '✗'}, 流式={'✓' if stream_ok else '✗'})")
+    return non_stream_ok and stream_ok
 
 
 # ============================================================
@@ -187,25 +291,44 @@ async def test_chat_to_responses():
     print("② Chat 请求 → Responses 后端")
     print("=" * 60)
     
+    # 非流式
     try:
         success, raw, resp = await call_backend(
             RESPONSES_CONFIG, engine_responses, CHAT_REQUEST, Protocol.OPENAI_CHAT
         )
         if not success:
-            print(f"  ✗ 失败: {resp}")
-            return False
-        # raw 是 Responses 格式，resp 是转回 Chat 的
-        text_from_raw = extract_text_from_responses_response(raw)
-        text_from_converted = extract_text_from_chat_response(resp)
-        print(f"  请求: Chat ({len(CHAT_REQUEST['messages'])} messages)")
-        print(f"  后端: Responses")
-        print(f"  原始响应: {text_from_raw[:100]}")
-        print(f"  回转Chat: {text_from_converted[:100]}")
-        print(f"  ✓ 通过" if text_from_raw and text_from_converted else "  ✗ 无文本")
-        return bool(text_from_raw and text_from_converted)
+            print(f"  ✗ 非流式失败: {resp}")
+            non_stream_ok = False
+        else:
+            text_from_raw = extract_text_from_responses_response(raw)
+            text_from_converted = extract_text_from_chat_response(resp)
+            print(f"  [非流式] 请求: Chat → Responses")
+            print(f"  [非流式] 原始: {text_from_raw[:80]}")
+            print(f"  [非流式] 回转: {text_from_converted[:80]}")
+            non_stream_ok = bool(text_from_raw and text_from_converted)
     except Exception as e:
-        print(f"  ✗ 异常: {e}")
-        return False
+        print(f"  ✗ 非流式异常: {e}")
+        non_stream_ok = False
+    
+    # 流式
+    try:
+        success, full_text, event_types = await call_backend_stream(
+            RESPONSES_CONFIG, engine_responses, CHAT_REQUEST, Protocol.OPENAI_CHAT
+        )
+        if not success:
+            print(f"  ✗ 流式失败")
+            stream_ok = False
+        else:
+            print(f"  [流式]   请求: Chat → Responses")
+            print(f"  [流式]   响应: {full_text[:80]}")
+            print(f"  [流式]   事件: {sorted(event_types)}")
+            stream_ok = bool(full_text)
+    except Exception as e:
+        print(f"  ✗ 流式异常: {e}")
+        stream_ok = False
+    
+    print(f"  {'✓ 通过' if non_stream_ok and stream_ok else '✗ 失败'} (非流式={'✓' if non_stream_ok else '✗'}, 流式={'✓' if stream_ok else '✗'})")
+    return non_stream_ok and stream_ok
 
 
 # ============================================================
@@ -217,24 +340,44 @@ async def test_chat_to_anthropic():
     print("③ Chat 请求 → Anthropic 后端")
     print("=" * 60)
     
+    # 非流式
     try:
         success, raw, resp = await call_backend(
             ANTHROPIC_CONFIG, engine_anthropic, CHAT_REQUEST, Protocol.OPENAI_CHAT
         )
         if not success:
-            print(f"  ✗ 失败: {resp}")
-            return False
-        text_from_raw = extract_text_from_anthropic_response(raw)
-        text_from_converted = extract_text_from_chat_response(resp)
-        print(f"  请求: Chat ({len(CHAT_REQUEST['messages'])} messages)")
-        print(f"  后端: Anthropic")
-        print(f"  原始响应: {text_from_raw[:100]}")
-        print(f"  回转Chat: {text_from_converted[:100]}")
-        print(f"  ✓ 通过" if text_from_raw and text_from_converted else "  ✗ 无文本")
-        return bool(text_from_raw and text_from_converted)
+            print(f"  ✗ 非流式失败: {resp}")
+            non_stream_ok = False
+        else:
+            text_from_raw = extract_text_from_anthropic_response(raw)
+            text_from_converted = extract_text_from_chat_response(resp)
+            print(f"  [非流式] 请求: Chat → Anthropic")
+            print(f"  [非流式] 原始: {text_from_raw[:80]}")
+            print(f"  [非流式] 回转: {text_from_converted[:80]}")
+            non_stream_ok = bool(text_from_raw and text_from_converted)
     except Exception as e:
-        print(f"  ✗ 异常: {e}")
-        return False
+        print(f"  ✗ 非流式异常: {e}")
+        non_stream_ok = False
+    
+    # 流式
+    try:
+        success, full_text, event_types = await call_backend_stream(
+            ANTHROPIC_CONFIG, engine_anthropic, CHAT_REQUEST, Protocol.OPENAI_CHAT
+        )
+        if not success:
+            print(f"  ✗ 流式失败")
+            stream_ok = False
+        else:
+            print(f"  [流式]   请求: Chat → Anthropic")
+            print(f"  [流式]   响应: {full_text[:80]}")
+            print(f"  [流式]   事件: {sorted(event_types)}")
+            stream_ok = bool(full_text)
+    except Exception as e:
+        print(f"  ✗ 流式异常: {e}")
+        stream_ok = False
+    
+    print(f"  {'✓ 通过' if non_stream_ok and stream_ok else '✗ 失败'} (非流式={'✓' if non_stream_ok else '✗'}, 流式={'✓' if stream_ok else '✗'})")
+    return non_stream_ok and stream_ok
 
 
 # ============================================================
@@ -246,24 +389,44 @@ async def test_responses_to_chat():
     print("④ Responses 请求 → Chat 后端")
     print("=" * 60)
     
+    # 非流式
     try:
         success, raw, resp = await call_backend(
             CHAT_CONFIG, engine_chat, RESPONSES_REQUEST, Protocol.OPENAI_RESPONSES
         )
         if not success:
-            print(f"  ✗ 失败: {resp}")
-            return False
-        text_from_raw = extract_text_from_chat_response(raw)
-        text_from_converted = extract_text_from_responses_response(resp)
-        print(f"  请求: Responses (input={RESPONSES_REQUEST['input'][:30]}...)")
-        print(f"  后端: Chat")
-        print(f"  原始响应: {text_from_raw[:100]}")
-        print(f"  回转Responses: {text_from_converted[:100]}")
-        print(f"  ✓ 通过" if text_from_raw and text_from_converted else "  ✗ 无文本")
-        return bool(text_from_raw and text_from_converted)
+            print(f"  ✗ 非流式失败: {resp}")
+            non_stream_ok = False
+        else:
+            text_from_raw = extract_text_from_chat_response(raw)
+            text_from_converted = extract_text_from_responses_response(resp)
+            print(f"  [非流式] 请求: Responses → Chat")
+            print(f"  [非流式] 原始: {text_from_raw[:80]}")
+            print(f"  [非流式] 回转: {text_from_converted[:80]}")
+            non_stream_ok = bool(text_from_raw and text_from_converted)
     except Exception as e:
-        print(f"  ✗ 异常: {e}")
-        return False
+        print(f"  ✗ 非流式异常: {e}")
+        non_stream_ok = False
+    
+    # 流式
+    try:
+        success, full_text, event_types = await call_backend_stream(
+            CHAT_CONFIG, engine_chat, RESPONSES_REQUEST, Protocol.OPENAI_RESPONSES
+        )
+        if not success:
+            print(f"  ✗ 流式失败")
+            stream_ok = False
+        else:
+            print(f"  [流式]   请求: Responses → Chat")
+            print(f"  [流式]   响应: {full_text[:80]}")
+            print(f"  [流式]   事件: {sorted(event_types)}")
+            stream_ok = bool(full_text)
+    except Exception as e:
+        print(f"  ✗ 流式异常: {e}")
+        stream_ok = False
+    
+    print(f"  {'✓ 通过' if non_stream_ok and stream_ok else '✗ 失败'} (非流式={'✓' if non_stream_ok else '✗'}, 流式={'✓' if stream_ok else '✗'})")
+    return non_stream_ok and stream_ok
 
 
 # ============================================================
@@ -275,22 +438,42 @@ async def test_responses_to_responses():
     print("⑤ Responses 请求 → Responses 后端")
     print("=" * 60)
     
+    # 非流式
     try:
         success, raw, resp = await call_backend(
             RESPONSES_CONFIG, engine_responses, RESPONSES_REQUEST, Protocol.OPENAI_RESPONSES
         )
         if not success:
-            print(f"  ✗ 失败: {resp}")
-            return False
-        text = extract_text_from_responses_response(raw)
-        print(f"  请求: Responses (input={RESPONSES_REQUEST['input'][:30]}...)")
-        print(f"  后端: Responses (直通)")
-        print(f"  响应: {text[:100]}")
-        print(f"  ✓ 通过" if text else "  ✗ 无文本")
-        return bool(text)
+            print(f"  ✗ 非流式失败: {resp}")
+            non_stream_ok = False
+        else:
+            text = extract_text_from_responses_response(raw)
+            print(f"  [非流式] 请求: Responses → Responses (直通)")
+            print(f"  [非流式] 响应: {text[:100]}")
+            non_stream_ok = bool(text)
     except Exception as e:
-        print(f"  ✗ 异常: {e}")
-        return False
+        print(f"  ✗ 非流式异常: {e}")
+        non_stream_ok = False
+    
+    # 流式
+    try:
+        success, full_text, event_types = await call_backend_stream(
+            RESPONSES_CONFIG, engine_responses, RESPONSES_REQUEST, Protocol.OPENAI_RESPONSES
+        )
+        if not success:
+            print(f"  ✗ 流式失败")
+            stream_ok = False
+        else:
+            print(f"  [流式]   请求: Responses → Responses (直通)")
+            print(f"  [流式]   响应: {full_text[:100]}")
+            print(f"  [流式]   事件: {sorted(event_types)}")
+            stream_ok = bool(full_text)
+    except Exception as e:
+        print(f"  ✗ 流式异常: {e}")
+        stream_ok = False
+    
+    print(f"  {'✓ 通过' if non_stream_ok and stream_ok else '✗ 失败'} (非流式={'✓' if non_stream_ok else '✗'}, 流式={'✓' if stream_ok else '✗'})")
+    return non_stream_ok and stream_ok
 
 
 # ============================================================
@@ -302,24 +485,44 @@ async def test_responses_to_anthropic():
     print("⑥ Responses 请求 → Anthropic 后端")
     print("=" * 60)
     
+    # 非流式
     try:
         success, raw, resp = await call_backend(
             ANTHROPIC_CONFIG, engine_anthropic, RESPONSES_REQUEST, Protocol.OPENAI_RESPONSES
         )
         if not success:
-            print(f"  ✗ 失败: {resp}")
-            return False
-        text_from_raw = extract_text_from_anthropic_response(raw)
-        text_from_converted = extract_text_from_responses_response(resp)
-        print(f"  请求: Responses (input={RESPONSES_REQUEST['input'][:30]}...)")
-        print(f"  后端: Anthropic")
-        print(f"  原始响应: {text_from_raw[:100]}")
-        print(f"  回转Responses: {text_from_converted[:100]}")
-        print(f"  ✓ 通过" if text_from_raw and text_from_converted else "  ✗ 无文本")
-        return bool(text_from_raw and text_from_converted)
+            print(f"  ✗ 非流式失败: {resp}")
+            non_stream_ok = False
+        else:
+            text_from_raw = extract_text_from_anthropic_response(raw)
+            text_from_converted = extract_text_from_responses_response(resp)
+            print(f"  [非流式] 请求: Responses → Anthropic")
+            print(f"  [非流式] 原始: {text_from_raw[:80]}")
+            print(f"  [非流式] 回转: {text_from_converted[:80]}")
+            non_stream_ok = bool(text_from_raw and text_from_converted)
     except Exception as e:
-        print(f"  ✗ 异常: {e}")
-        return False
+        print(f"  ✗ 非流式异常: {e}")
+        non_stream_ok = False
+    
+    # 流式
+    try:
+        success, full_text, event_types = await call_backend_stream(
+            ANTHROPIC_CONFIG, engine_anthropic, RESPONSES_REQUEST, Protocol.OPENAI_RESPONSES
+        )
+        if not success:
+            print(f"  ✗ 流式失败")
+            stream_ok = False
+        else:
+            print(f"  [流式]   请求: Responses → Anthropic")
+            print(f"  [流式]   响应: {full_text[:80]}")
+            print(f"  [流式]   事件: {sorted(event_types)}")
+            stream_ok = bool(full_text)
+    except Exception as e:
+        print(f"  ✗ 流式异常: {e}")
+        stream_ok = False
+    
+    print(f"  {'✓ 通过' if non_stream_ok and stream_ok else '✗ 失败'} (非流式={'✓' if non_stream_ok else '✗'}, 流式={'✓' if stream_ok else '✗'})")
+    return non_stream_ok and stream_ok
 
 
 # ============================================================
@@ -331,24 +534,44 @@ async def test_anthropic_to_chat():
     print("⑦ Anthropic 请求 → Chat 后端")
     print("=" * 60)
     
+    # 非流式
     try:
         success, raw, resp = await call_backend(
             CHAT_CONFIG, engine_chat, ANTHROPIC_REQUEST, Protocol.ANTHROPIC
         )
         if not success:
-            print(f"  ✗ 失败: {resp}")
-            return False
-        text_from_raw = extract_text_from_chat_response(raw)
-        text_from_converted = extract_text_from_anthropic_response(resp)
-        print(f"  请求: Anthropic (model={ANTHROPIC_REQUEST['model']})")
-        print(f"  后端: Chat")
-        print(f"  原始响应: {text_from_raw[:100]}")
-        print(f"  回转Anthropic: {text_from_converted[:100]}")
-        print(f"  ✓ 通过" if text_from_raw and text_from_converted else "  ✗ 无文本")
-        return bool(text_from_raw and text_from_converted)
+            print(f"  ✗ 非流式失败: {resp}")
+            non_stream_ok = False
+        else:
+            text_from_raw = extract_text_from_chat_response(raw)
+            text_from_converted = extract_text_from_anthropic_response(resp)
+            print(f"  [非流式] 请求: Anthropic → Chat")
+            print(f"  [非流式] 原始: {text_from_raw[:80]}")
+            print(f"  [非流式] 回转: {text_from_converted[:80]}")
+            non_stream_ok = bool(text_from_raw and text_from_converted)
     except Exception as e:
-        print(f"  ✗ 异常: {e}")
-        return False
+        print(f"  ✗ 非流式异常: {e}")
+        non_stream_ok = False
+    
+    # 流式
+    try:
+        success, full_text, event_types = await call_backend_stream(
+            CHAT_CONFIG, engine_chat, ANTHROPIC_REQUEST, Protocol.ANTHROPIC
+        )
+        if not success:
+            print(f"  ✗ 流式失败")
+            stream_ok = False
+        else:
+            print(f"  [流式]   请求: Anthropic → Chat")
+            print(f"  [流式]   响应: {full_text[:80]}")
+            print(f"  [流式]   事件: {sorted(event_types)}")
+            stream_ok = bool(full_text)
+    except Exception as e:
+        print(f"  ✗ 流式异常: {e}")
+        stream_ok = False
+    
+    print(f"  {'✓ 通过' if non_stream_ok and stream_ok else '✗ 失败'} (非流式={'✓' if non_stream_ok else '✗'}, 流式={'✓' if stream_ok else '✗'})")
+    return non_stream_ok and stream_ok
 
 
 # ============================================================
@@ -360,24 +583,44 @@ async def test_anthropic_to_responses():
     print("⑧ Anthropic 请求 → Responses 后端")
     print("=" * 60)
     
+    # 非流式
     try:
         success, raw, resp = await call_backend(
             RESPONSES_CONFIG, engine_responses, ANTHROPIC_REQUEST, Protocol.ANTHROPIC
         )
         if not success:
-            print(f"  ✗ 失败: {resp}")
-            return False
-        text_from_raw = extract_text_from_responses_response(raw)
-        text_from_converted = extract_text_from_anthropic_response(resp)
-        print(f"  请求: Anthropic (model={ANTHROPIC_REQUEST['model']})")
-        print(f"  后端: Responses")
-        print(f"  原始响应: {text_from_raw[:100]}")
-        print(f"  回转Anthropic: {text_from_converted[:100]}")
-        print(f"  ✓ 通过" if text_from_raw and text_from_converted else "  ✗ 无文本")
-        return bool(text_from_raw and text_from_converted)
+            print(f"  ✗ 非流式失败: {resp}")
+            non_stream_ok = False
+        else:
+            text_from_raw = extract_text_from_responses_response(raw)
+            text_from_converted = extract_text_from_anthropic_response(resp)
+            print(f"  [非流式] 请求: Anthropic → Responses")
+            print(f"  [非流式] 原始: {text_from_raw[:80]}")
+            print(f"  [非流式] 回转: {text_from_converted[:80]}")
+            non_stream_ok = bool(text_from_raw and text_from_converted)
     except Exception as e:
-        print(f"  ✗ 异常: {e}")
-        return False
+        print(f"  ✗ 非流式异常: {e}")
+        non_stream_ok = False
+    
+    # 流式
+    try:
+        success, full_text, event_types = await call_backend_stream(
+            RESPONSES_CONFIG, engine_responses, ANTHROPIC_REQUEST, Protocol.ANTHROPIC
+        )
+        if not success:
+            print(f"  ✗ 流式失败")
+            stream_ok = False
+        else:
+            print(f"  [流式]   请求: Anthropic → Responses")
+            print(f"  [流式]   响应: {full_text[:80]}")
+            print(f"  [流式]   事件: {sorted(event_types)}")
+            stream_ok = bool(full_text)
+    except Exception as e:
+        print(f"  ✗ 流式异常: {e}")
+        stream_ok = False
+    
+    print(f"  {'✓ 通过' if non_stream_ok and stream_ok else '✗ 失败'} (非流式={'✓' if non_stream_ok else '✗'}, 流式={'✓' if stream_ok else '✗'})")
+    return non_stream_ok and stream_ok
 
 
 # ============================================================
@@ -389,22 +632,42 @@ async def test_anthropic_to_anthropic():
     print("⑨ Anthropic 请求 → Anthropic 后端")
     print("=" * 60)
     
+    # 非流式
     try:
         success, raw, resp = await call_backend(
             ANTHROPIC_CONFIG, engine_anthropic, ANTHROPIC_REQUEST, Protocol.ANTHROPIC
         )
         if not success:
-            print(f"  ✗ 失败: {resp}")
-            return False
-        text = extract_text_from_anthropic_response(raw)
-        print(f"  请求: Anthropic (model={ANTHROPIC_REQUEST['model']})")
-        print(f"  后端: Anthropic (直通)")
-        print(f"  响应: {text[:100]}")
-        print(f"  ✓ 通过" if text else "  ✗ 无文本")
-        return bool(text)
+            print(f"  ✗ 非流式失败: {resp}")
+            non_stream_ok = False
+        else:
+            text = extract_text_from_anthropic_response(raw)
+            print(f"  [非流式] 请求: Anthropic → Anthropic (直通)")
+            print(f"  [非流式] 响应: {text[:100]}")
+            non_stream_ok = bool(text)
     except Exception as e:
-        print(f"  ✗ 异常: {e}")
-        return False
+        print(f"  ✗ 非流式异常: {e}")
+        non_stream_ok = False
+    
+    # 流式
+    try:
+        success, full_text, event_types = await call_backend_stream(
+            ANTHROPIC_CONFIG, engine_anthropic, ANTHROPIC_REQUEST, Protocol.ANTHROPIC
+        )
+        if not success:
+            print(f"  ✗ 流式失败")
+            stream_ok = False
+        else:
+            print(f"  [流式]   请求: Anthropic → Anthropic (直通)")
+            print(f"  [流式]   响应: {full_text[:100]}")
+            print(f"  [流式]   事件: {sorted(event_types)}")
+            stream_ok = bool(full_text)
+    except Exception as e:
+        print(f"  ✗ 流式异常: {e}")
+        stream_ok = False
+    
+    print(f"  {'✓ 通过' if non_stream_ok and stream_ok else '✗ 失败'} (非流式={'✓' if non_stream_ok else '✗'}, 流式={'✓' if stream_ok else '✗'})")
+    return non_stream_ok and stream_ok
 
 
 # ============================================================
@@ -413,7 +676,7 @@ async def test_anthropic_to_anthropic():
 
 async def run_all_tests():
     print("=" * 60)
-    print("9 路全量集成测试 - 3 协议 × 3 后端")
+    print("9 路全量集成测试 - 3 协议 × 3 后端 (非流式 + 流式)")
     print("=" * 60)
     print(f"  Chat 后端:      {CHAT_CONFIG.backend_url}")
     print(f"  Responses 后端: {RESPONSES_CONFIG.backend_url}")

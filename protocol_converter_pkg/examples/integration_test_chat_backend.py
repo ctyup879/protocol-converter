@@ -8,6 +8,7 @@
 4. Thinking / reasoning_effort 参数映射
 5. 响应回转（后端响应 → 客户端协议格式）
 6. 多模态内容转换
+7. 跨协议流式请求（Responses→Chat 流式、Anthropic→Chat 流式）
 """
 
 import asyncio
@@ -460,6 +461,114 @@ async def test_multimodal():
             print(f"  Responses input_image → Chat image_url: {len(img_blocks)} 个")
 
 
+async def test_streaming_responses_to_chat():
+    """测试 Responses 请求 → Chat 后端流式"""
+    print("\n" + "=" * 60)
+    print("测试 9: Responses 请求 → Chat 后端 (流式)")
+    print("=" * 60)
+    
+    try:
+        import httpx
+        
+        responses_request = {
+            "model": "gpt-4o",
+            "input": [{"type": "message", "role": "user", "content": [{"type": "text", "text": "Count from 1 to 3."}]}],
+            "instructions": "You are helpful.",
+        }
+        
+        converted = engine.convert_request(responses_request)
+        converted["model"] = CONFIG.default_model
+        converted["stream"] = True
+        converted["stream_options"] = {"include_usage": True}
+        
+        headers = {
+            "Content-Type": "application/json",
+            **CONFIG.get_auth_headers()
+        }
+        
+        async with httpx.AsyncClient(timeout=CONFIG.timeout) as client:
+            async with client.stream("POST", CONFIG.backend_url, headers=headers, json=converted) as response:
+                if response.status_code == 200:
+                    full_content = ""
+                    print("  流式响应: ", end="", flush=True)
+                    async for line in response.aiter_lines():
+                        if line.startswith("data:"):
+                            data = line[5:].strip()
+                            if data == "[DONE]":
+                                break
+                            try:
+                                chunk = json.loads(data)
+                                delta = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                if delta:
+                                    print(delta, end="", flush=True)
+                                    full_content += delta
+                            except:
+                                pass
+                    print(f"\n  完整响应: {full_content}")
+                    return True
+                else:
+                    print(f"  错误: {response.status_code}")
+                    return False
+    except Exception as e:
+        print(f"  流式请求失败: {e}")
+        return False
+
+
+async def test_streaming_anthropic_to_chat():
+    """测试 Anthropic 请求 → Chat 后端流式"""
+    print("\n" + "=" * 60)
+    print("测试 10: Anthropic 请求 → Chat 后端 (流式)")
+    print("=" * 60)
+    
+    try:
+        import httpx
+        
+        anthropic_request = {
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 200,
+            "system": "You are helpful.",
+            "stream": True,
+            "messages": [{"role": "user", "content": "Count from 1 to 3."}]
+        }
+        
+        converted = engine.convert_request(anthropic_request)
+        converted["model"] = CONFIG.default_model
+        converted["stream"] = True
+        converted["stream_options"] = {"include_usage": True}
+        
+        headers = {
+            "Content-Type": "application/json",
+            **CONFIG.get_auth_headers()
+        }
+        
+        async with httpx.AsyncClient(timeout=CONFIG.timeout) as client:
+            async with client.stream("POST", CONFIG.backend_url, headers=headers, json=converted) as response:
+                if response.status_code == 200:
+                    full_content = ""
+                    print("  流式响应: ", end="", flush=True)
+                    async for line in response.aiter_lines():
+                        if line.startswith("data:"):
+                            data = line[5:].strip()
+                            if data == "[DONE]":
+                                break
+                            try:
+                                chunk = json.loads(data)
+                                delta = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                if delta:
+                                    print(delta, end="", flush=True)
+                                    full_content += delta
+                            except:
+                                pass
+                    print(f"\n  完整响应: {full_content}")
+                    return True
+                else:
+                    print(f"  错误: {response.status_code}")
+                    return False
+    except Exception as e:
+        print(f"  流式请求失败: {e}")
+        return False
+
+
 # ============================================================
 # 主函数
 # ============================================================
@@ -480,6 +589,8 @@ async def run_all_tests():
     success = await test_api_call()
     if success:
         await test_streaming()
+        await test_streaming_responses_to_chat()
+        await test_streaming_anthropic_to_chat()
     
     print("\n" + "=" * 60)
     print("集成测试完成")

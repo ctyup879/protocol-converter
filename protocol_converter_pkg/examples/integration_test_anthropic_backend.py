@@ -9,6 +9,8 @@
 5. Tool calling 跨协议转换
 6. Thinking / reasoning_effort 参数
 7. 响应回转（Anthropic 后端响应 → Chat/Responses 格式）
+8. Chat 请求 → Anthropic 后端流式
+9. Responses 请求 → Anthropic 后端流式
 """
 
 import asyncio
@@ -455,6 +457,128 @@ async def test_response_roundtrip():
     assert chat_tool_resp["choices"][0]["finish_reason"] == "tool_calls"
 
 
+async def test_stream_chat_to_anthropic_backend():
+    """测试 Chat 请求 → Anthropic 后端（流式）"""
+    print("\n" + "=" * 60)
+    print("测试 8: Chat 请求 → Anthropic 后端 (流式)")
+    print("=" * 60)
+    
+    chat_request = {
+        "model": "gpt-4o",
+        "messages": [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Count from 1 to 3."}
+        ],
+        "max_completion_tokens": 200,
+    }
+    
+    converted = engine_anthropic.convert_request(chat_request)
+    converted["model"] = CONFIG_ANTHROPIC.default_model
+    converted["stream"] = True
+    
+    try:
+        import httpx
+        headers = {
+            "Content-Type": "application/json",
+            **CONFIG_ANTHROPIC.get_auth_headers()
+        }
+        
+        async with httpx.AsyncClient(timeout=CONFIG_ANTHROPIC.timeout) as client:
+            async with client.stream("POST", CONFIG_ANTHROPIC.backend_url, headers=headers, json=converted) as response:
+                if response.status_code == 200:
+                    full_content = ""
+                    event_types = []
+                    print("  流式响应: ", end="", flush=True)
+                    async for line in response.aiter_lines():
+                        if line.startswith("event:"):
+                            event_type = line[6:].strip()
+                            event_types.append(event_type)
+                        elif line.startswith("data:"):
+                            data = line[5:].strip()
+                            if data == "[DONE]":
+                                break
+                            try:
+                                chunk = json.loads(data)
+                                chunk_type = chunk.get("type", "")
+                                if chunk_type == "content_block_delta":
+                                    delta = chunk.get("delta", {})
+                                    if delta.get("type") == "text_delta":
+                                        text = delta.get("text", "")
+                                        print(text, end="", flush=True)
+                                        full_content += text
+                            except:
+                                pass
+                    print(f"\n  收到事件类型: {list(set(event_types))}")
+                    print(f"  完整响应: {full_content}")
+                    return True
+                else:
+                    print(f"  错误: {response.status_code}")
+                    return False
+    except Exception as e:
+        print(f"  流式请求失败: {e}")
+        return False
+
+
+async def test_stream_responses_to_anthropic_backend():
+    """测试 Responses 请求 → Anthropic 后端（流式）"""
+    print("\n" + "=" * 60)
+    print("测试 9: Responses 请求 → Anthropic 后端 (流式)")
+    print("=" * 60)
+    
+    responses_request = {
+        "model": "gpt-4o",
+        "input": [{"type": "message", "role": "user", "content": [{"type": "text", "text": "Count from 1 to 3."}]}],
+        "instructions": "You are helpful.",
+        "max_output_tokens": 200,
+    }
+    
+    converted = engine_anthropic.convert_request(responses_request)
+    converted["model"] = CONFIG_ANTHROPIC.default_model
+    converted["stream"] = True
+    
+    try:
+        import httpx
+        headers = {
+            "Content-Type": "application/json",
+            **CONFIG_ANTHROPIC.get_auth_headers()
+        }
+        
+        async with httpx.AsyncClient(timeout=CONFIG_ANTHROPIC.timeout) as client:
+            async with client.stream("POST", CONFIG_ANTHROPIC.backend_url, headers=headers, json=converted) as response:
+                if response.status_code == 200:
+                    full_content = ""
+                    event_types = []
+                    print("  流式响应: ", end="", flush=True)
+                    async for line in response.aiter_lines():
+                        if line.startswith("event:"):
+                            event_type = line[6:].strip()
+                            event_types.append(event_type)
+                        elif line.startswith("data:"):
+                            data = line[5:].strip()
+                            if data == "[DONE]":
+                                break
+                            try:
+                                chunk = json.loads(data)
+                                chunk_type = chunk.get("type", "")
+                                if chunk_type == "content_block_delta":
+                                    delta = chunk.get("delta", {})
+                                    if delta.get("type") == "text_delta":
+                                        text = delta.get("text", "")
+                                        print(text, end="", flush=True)
+                                        full_content += text
+                            except:
+                                pass
+                    print(f"\n  收到事件类型: {list(set(event_types))}")
+                    print(f"  完整响应: {full_content}")
+                    return True
+                else:
+                    print(f"  错误: {response.status_code}")
+                    return False
+    except Exception as e:
+        print(f"  流式请求失败: {e}")
+        return False
+
+
 # ============================================================
 # 主函数
 # ============================================================
@@ -471,10 +595,9 @@ async def run_all_tests():
     await test_tool_calling_cross_protocol()
     await test_thinking_reasoning_anthropic_backend()
     await test_response_roundtrip()
-    
-    success = await test_anthropic_backend_direct()
-    if success:
-        await test_stream_anthropic_backend()
+    await test_stream_anthropic_backend()
+    await test_stream_chat_to_anthropic_backend()
+    await test_stream_responses_to_anthropic_backend()
     
     print("\n" + "=" * 60)
     print("集成测试完成")
