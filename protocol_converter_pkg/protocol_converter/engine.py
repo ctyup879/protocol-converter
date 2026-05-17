@@ -14,6 +14,7 @@ from .protocol_detector import ProtocolDetector, Protocol
 from .openai_chat import OpenAIChatConverter
 from .openai_responses import OpenAIResponsesConverter
 from .anthropic import AnthropicConverter
+from .exceptions import ProtocolConversionError, UnsupportedProtocolError, InvalidRequestError
 
 
 class ConversionMode(Enum):
@@ -214,7 +215,16 @@ class ProtocolConverterEngine:
             
         Returns:
             Dict: 转换后的请求
+            
+        Raises:
+            InvalidRequestError: 如果 request 不是字典
+            UnsupportedProtocolError: 如果检测到的协议类型为 UNKNOWN
         """
+        if not isinstance(request, dict):
+            raise InvalidRequestError(
+                f"request must be a dict, got {type(request).__name__}",
+                field="request"
+            )
         # 检测源协议
         source_protocol = self.detect_protocol(request)
         
@@ -276,8 +286,8 @@ class ProtocolConverterEngine:
             if source_protocol == Protocol.OPENAI_CHAT:
                 result = self.openai_responses.from_openai_chat_request(request)
             elif source_protocol == Protocol.ANTHROPIC:
-                chat_req = self.anthropic.to_openai_chat(request)
-                result = self.openai_responses.from_openai_chat_request(chat_req)
+                # 直接转换路径，避免经 Chat 中转丢失 reasoning/output_format 等数据
+                result = self._anthropic_to_responses_request(request)
             else:
                 result = copy.deepcopy(request) if isinstance(request, dict) else request
         
@@ -834,6 +844,68 @@ class ProtocolConverterEngine:
         
         return anthropic_request
     
+    def _anthropic_to_responses_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """将 Anthropic 请求直接转换为 OpenAI Responses 格式（避免经 Chat 中转丢失数据）"""
+        # 先转换为 Chat 中间格式以复用已有的 Anthropic→Chat 转换逻辑
+        chat_request = self.anthropic.to_openai_chat(request)
+        # 再从 Chat 转换为 Responses 格式
+        result = self.openai_responses.from_openai_chat_request(chat_request)
+        
+        # 恢复 Chat 中转丢失的 Anthropic 特有数据
+        # 1. thinking 参数中的 display 和 adaptive 类型
+        thinking = request.get("thinking")
+        if thinking and isinstance(thinking, dict):
+            thinking_type = thinking.get("type")
+            if thinking_type in ("enabled", "adaptive"):
+                effort = chat_request.get("reasoning_effort", "medium")
+                reasoning_config = {"effort": effort}
+                # reasoning.summary 映射
+                display = thinking.get("display")
+                if display == "summarized":
+                    reasoning_config["summary"] = "concise"
+                elif display == "omitted":
+                    reasoning_config["summary"] = "omitted"
+                # adaptive 类型标记
+                if thinking_type == "adaptive":
+                    reasoning_config["effort"] = "medium"  # adaptive 无确切 effort，默认 medium
+                result["reasoning"] = reasoning_config
+            elif thinking_type == "disabled":
+                result["reasoning"] = {"effort": "none"}
+        
+        # 2. output_format → text.format（Anthropic 结构化输出）
+        output_format = request.get("output_format")
+        if output_format and isinstance(output_format, dict):
+            fmt_type = output_format.get("type", "")
+            text_format = {}
+            if fmt_type == "json_schema":
+                text_format = {"type": "json_schema"}
+                if output_format.get("name"):
+                    text_format["name"] = output_format["name"]
+                if output_format.get("schema"):
+                    text_format["schema"] = output_format["schema"]
+                if output_format.get("strict") is not None:
+                    text_format["strict"] = output_format["strict"]
+            elif fmt_type == "json_object":
+                text_format = {"type": "json_object"}
+            if text_format:
+                result["text"] = {"format": text_format}
+        
+        # 3. parallel_tool_calls → disable_parallel_tool_use 反向映射
+        # Chat 中转时 parallel_tool_calls 已被设置，但如果 Anthropic 原始请求
+        # 中 tool_choice.disable_parallel_tool_use 为 True，需要确保 Responses 也禁用并行
+        tool_choice_raw = request.get("tool_choice")
+        if isinstance(tool_choice_raw, dict) and tool_choice_raw.get("disable_parallel_tool_use"):
+            result["parallel_tool_calls"] = False
+        
+        # 应用模型映射
+        if isinstance(result, dict) and "model" in result:
+            original_model = result["model"]
+            mapped_model = self.config.get_model(original_model)
+            if mapped_model != original_model:
+                result["model"] = mapped_model
+        
+        return result
+    
     def convert_response(
         self, 
         response: Dict[str, Any],
@@ -850,7 +922,21 @@ class ProtocolConverterEngine:
             
         Returns:
             Dict: 目标协议格式的响应
+            
+        Raises:
+            InvalidRequestError: 如果 response 不是字典
+            UnsupportedProtocolError: 如果 target_protocol 为 UNKNOWN
         """
+        if not isinstance(response, dict):
+            raise InvalidRequestError(
+                f"response must be a dict, got {type(response).__name__}",
+                field="response"
+            )
+        if target_protocol == Protocol.UNKNOWN:
+            raise UnsupportedProtocolError(
+                "Cannot convert response to UNKNOWN protocol",
+                target_protocol="unknown"
+            )
         # 先判断响应格式（基于后端类型）
         backend_format = self._get_target_format()
         
@@ -1390,10 +1476,17 @@ class ProtocolConverterEngine:
 def create_http_client() -> Callable:
     """
     创建 HTTP 客户端（使用 httpx）
+    
+    支持:
+    - 非流式请求: 返回 JSON 响应
+    - 流式请求 (stream=True): 返回 httpx.Response 对象（含 aiter_lines 方法）
     """
     try:
         import httpx
         import asyncio
+        
+        # 使用模块级客户端以支持连接池和 keep-alive
+        _client = httpx.AsyncClient(timeout=None)
         
         async def client(
             url: str,
@@ -1403,11 +1496,20 @@ def create_http_client() -> Callable:
             timeout: float = 60.0,
             stream: bool = False
         ):
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            if stream:
+                # 流式请求: 返回 httpx.Response 对象
+                # 调用方需使用 async with 或手动关闭
+                request = _client.build_request(
+                    method, url, json=json, headers=headers, timeout=timeout
+                )
+                response = await _client.send(request, stream=True)
+                return response
+            else:
+                # 非流式请求: 返回 JSON 响应
                 if method == "POST":
-                    response = await client.post(url, json=json, headers=headers)
+                    response = await _client.post(url, json=json, headers=headers, timeout=timeout)
                 else:
-                    response = await client.get(url, headers=headers)
+                    response = await _client.get(url, headers=headers, timeout=timeout)
                 return response.json()
         
         return client

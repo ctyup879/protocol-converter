@@ -7,14 +7,24 @@ from .protocol_detector import ProtocolDetector, Protocol
 from .openai_chat import OpenAIChatConverter
 from .openai_responses import OpenAIResponsesConverter
 from .anthropic import AnthropicConverter
+from .exceptions import (
+    ProtocolConversionError,
+    UnsupportedProtocolError,
+    InvalidRequestError,
+    StreamStateError,
+)
 
-__version__ = "1.26.0"
+__version__ = "1.27.0"
 __all__ = [
     "ProtocolConverterEngine",
     "ConverterConfig",
-    "ProtocolDetector", 
+    "ProtocolDetector",
     "Protocol",
     "OpenAIChatConverter",
     "OpenAIResponsesConverter",
     "AnthropicConverter",
+    "ProtocolConversionError",
+    "UnsupportedProtocolError",
+    "InvalidRequestError",
+    "StreamStateError",
 ]

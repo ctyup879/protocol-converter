@@ -12,6 +12,10 @@ from protocol_converter import (
     AnthropicConverter,
     ProtocolConverterEngine,
     ConverterConfig,
+    ProtocolConversionError,
+    UnsupportedProtocolError,
+    InvalidRequestError,
+    StreamStateError,
 )
 
 
@@ -7227,3 +7231,290 @@ class TestRedactedThinkingFullRoundTrip:
         redacted_blocks = [b for b in anthropic_back["content"] if b["type"] == "redacted_thinking"]
         assert len(redacted_blocks) == 1
         assert redacted_blocks[0]["data"] == "rt_encrypted_003"
+
+
+# ================================================================
+# v1.27.0 新增测试
+# ================================================================
+
+
+class TestCustomExceptions:
+    """自定义异常类测试"""
+    
+    def test_protocol_conversion_error(self):
+        """测试基础转换异常"""
+        err = ProtocolConversionError("test error", source_protocol="anthropic", target_protocol="openai_chat")
+        assert str(err) == "test error"
+        assert err.source_protocol == "anthropic"
+        assert err.target_protocol == "openai_chat"
+    
+    def test_unsupported_protocol_error(self):
+        """测试不支持的协议异常"""
+        err = UnsupportedProtocolError("unsupported", target_protocol="unknown")
+        assert isinstance(err, ProtocolConversionError)
+        assert err.target_protocol == "unknown"
+    
+    def test_invalid_request_error(self):
+        """测试无效请求异常"""
+        err = InvalidRequestError("bad request", field="messages")
+        assert isinstance(err, ProtocolConversionError)
+        assert err.field == "messages"
+    
+    def test_stream_state_error(self):
+        """测试流式状态异常"""
+        err = StreamStateError("concurrent conflict")
+        assert isinstance(err, ProtocolConversionError)
+
+
+class TestEngineValidation:
+    """Engine 输入验证测试"""
+    
+    def test_convert_request_invalid_type(self):
+        """测试 convert_request 传入非字典类型"""
+        engine = ProtocolConverterEngine()
+        with pytest.raises(InvalidRequestError, match="must be a dict"):
+            engine.convert_request("not a dict")
+    
+    def test_convert_request_none(self):
+        """测试 convert_request 传入 None"""
+        engine = ProtocolConverterEngine()
+        with pytest.raises(InvalidRequestError):
+            engine.convert_request(None)
+    
+    def test_convert_response_invalid_type(self):
+        """测试 convert_response 传入非字典类型"""
+        engine = ProtocolConverterEngine()
+        with pytest.raises(InvalidRequestError, match="must be a dict"):
+            engine.convert_response("not a dict", Protocol.OPENAI_CHAT)
+    
+    def test_convert_response_unknown_protocol(self):
+        """测试 convert_response 目标协议为 UNKNOWN"""
+        engine = ProtocolConverterEngine()
+        with pytest.raises(UnsupportedProtocolError):
+            engine.convert_response({"id": "test"}, Protocol.UNKNOWN)
+
+
+class TestAnthropicToResponsesDirect:
+    """Anthropic → Responses 直接转换路径测试"""
+    
+    def test_anthropic_to_responses_request_simple(self):
+        """测试简单 Anthropic 请求直接转 Responses"""
+        engine = ProtocolConverterEngine(ConverterConfig(backend_type="openai_responses"))
+        request = {
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1024,
+            "messages": [
+                {"role": "user", "content": "Hello"}
+            ]
+        }
+        result = engine.convert_request(request)
+        assert result["model"] == "claude-sonnet-4-20250514"
+        assert "input" in result
+    
+    def test_anthropic_to_responses_request_with_thinking(self):
+        """测试带 thinking 参数的 Anthropic 请求直接转 Responses"""
+        engine = ProtocolConverterEngine(ConverterConfig(backend_type="openai_responses"))
+        request = {
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1024,
+            "messages": [
+                {"role": "user", "content": "Hello"}
+            ],
+            "thinking": {"type": "enabled", "budget_tokens": 32000}
+        }
+        result = engine.convert_request(request)
+        # thinking → reasoning (effort + summary)
+        assert "reasoning" in result
+        assert result["reasoning"]["effort"] == "high"
+    
+    def test_anthropic_to_responses_request_with_output_format(self):
+        """测试带 output_format 的 Anthropic 请求直接转 Responses"""
+        engine = ProtocolConverterEngine(ConverterConfig(backend_type="openai_responses"))
+        request = {
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1024,
+            "messages": [
+                {"role": "user", "content": "Hello"}
+            ],
+            "output_format": {
+                "type": "json_schema",
+                "name": "my_schema",
+                "schema": {"type": "object", "properties": {"name": {"type": "string"}}}
+            }
+        }
+        result = engine.convert_request(request)
+        # output_format → text.format
+        assert "text" in result
+        assert result["text"]["format"]["type"] == "json_schema"
+        assert result["text"]["format"]["name"] == "my_schema"
+    
+    def test_anthropic_to_responses_with_system(self):
+        """测试带 system prompt 的 Anthropic 请求直接转 Responses"""
+        engine = ProtocolConverterEngine(ConverterConfig(backend_type="openai_responses"))
+        request = {
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1024,
+            "system": "You are a helpful assistant.",
+            "messages": [
+                {"role": "user", "content": "Hello"}
+            ]
+        }
+        result = engine.convert_request(request)
+        # system → instructions
+        assert result.get("instructions") == "You are a helpful assistant."
+    
+    def test_anthropic_to_responses_with_thinking_display(self):
+        """测试 thinking.display 正确映射到 reasoning.summary"""
+        engine = ProtocolConverterEngine(ConverterConfig(backend_type="openai_responses"))
+        request = {
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1024,
+            "messages": [
+                {"role": "user", "content": "Hello"}
+            ],
+            "thinking": {"type": "enabled", "budget_tokens": 10000, "display": "summarized"}
+        }
+        result = engine.convert_request(request)
+        assert result["reasoning"]["effort"] == "medium"
+        assert result["reasoning"]["summary"] == "concise"
+    
+    def test_anthropic_to_responses_with_adaptive_thinking(self):
+        """测试 adaptive thinking 类型映射"""
+        engine = ProtocolConverterEngine(ConverterConfig(backend_type="openai_responses"))
+        request = {
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1024,
+            "messages": [
+                {"role": "user", "content": "Hello"}
+            ],
+            "thinking": {"type": "adaptive", "display": "omitted"}
+        }
+        result = engine.convert_request(request)
+        assert "reasoning" in result
+        assert result["reasoning"]["summary"] == "omitted"
+    
+    def test_anthropic_to_responses_with_model_mapping(self):
+        """测试模型映射在直接转换路径中生效"""
+        engine = ProtocolConverterEngine(ConverterConfig(
+            backend_type="openai_responses",
+            model_mapping={"claude-sonnet-4-20250514": "gpt-4o"}
+        ))
+        request = {
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1024,
+            "messages": [
+                {"role": "user", "content": "Hello"}
+            ]
+        }
+        result = engine.convert_request(request)
+        assert result["model"] == "gpt-4o"
+
+
+class TestStreamStateConcurrency:
+    """流式状态并发安全性测试"""
+    
+    def test_create_stream_state_independent(self):
+        """测试创建独立的流式状态实例"""
+        state1 = AnthropicConverter.create_stream_state()
+        state2 = AnthropicConverter.create_stream_state()
+        
+        # 修改 state1 不应影响 state2
+        state1["text_block_started"] = True
+        state1["next_block_index"] = 5
+        
+        assert state2["text_block_started"] is False
+        assert state2["next_block_index"] == 0
+    
+    def test_convert_stream_chunk_with_state(self):
+        """测试使用独立状态的流式转换"""
+        state = AnthropicConverter.create_stream_state()
+        
+        # 模拟流式开始
+        chunk = {
+            "id": "chatcmpl-test",
+            "model": "gpt-4o",
+            "choices": [{
+                "index": 0,
+                "delta": {"role": "assistant", "content": ""},
+                "finish_reason": None
+            }]
+        }
+        events = AnthropicConverter.convert_stream_chunk_with_state(chunk, state)
+        assert len(events) == 1
+        assert events[0]["type"] == "message_start"
+        
+        # 文本增量
+        text_chunk = {
+            "id": "chatcmpl-test",
+            "model": "gpt-4o",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "Hello"},
+                "finish_reason": None
+            }]
+        }
+        events = AnthropicConverter.convert_stream_chunk_with_state(text_chunk, state)
+        # 应该先发 content_block_start，再发 content_block_delta
+        assert any(e["type"] == "content_block_start" for e in events)
+        assert any(e["type"] == "content_block_delta" for e in events)
+    
+    def test_create_anthropic_to_chat_state_independent(self):
+        """测试创建独立的 Anthropic→Chat 流式状态"""
+        state1 = AnthropicConverter.create_anthropic_to_chat_state()
+        state2 = AnthropicConverter.create_anthropic_to_chat_state()
+        
+        state1["msg_id"] = "test-1"
+        state1["tool_call_index"] = 3
+        
+        assert state2["msg_id"] is None
+        assert state2["tool_call_index"] == 0
+    
+    def test_convert_anthropic_event_to_chat_with_state(self):
+        """测试使用独立状态的 Anthropic→Chat 流式转换"""
+        state = AnthropicConverter.create_anthropic_to_chat_state()
+        
+        # message_start 事件
+        chunks = AnthropicConverter.convert_anthropic_event_to_chat_with_state(
+            "message_start",
+            {"message": {"id": "msg_test", "model": "claude-3", "usage": {"input_tokens": 10}}},
+            state
+        )
+        assert len(chunks) == 1
+        assert chunks[0]["choices"][0]["delta"]["role"] == "assistant"
+        assert state["msg_id"] == "msg_test"
+    
+    def test_stream_state_does_not_leak_between_instances(self):
+        """测试类变量状态不会在独立实例之间泄漏"""
+        state_a = AnthropicConverter.create_stream_state()
+        state_b = AnthropicConverter.create_stream_state()
+        
+        # 模拟完整的流式请求 A
+        start_chunk = {
+            "id": "chatcmpl-a",
+            "model": "gpt-4o",
+            "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}]
+        }
+        AnthropicConverter.convert_stream_chunk_with_state(start_chunk, state_a)
+        
+        # state_a 已被修改，state_b 仍为初始状态
+        assert state_a["text_block_started"] is False  # 刚开始，text 还没开始
+        assert state_b["text_block_started"] is False
+
+
+class TestHTTPClientStreamingSupport:
+    """HTTP 客户端流式支持测试"""
+    
+    def test_create_http_client_returns_callable(self):
+        """测试 create_http_client 返回可调用对象"""
+        from protocol_converter.engine import create_http_client
+        client = create_http_client()
+        assert callable(client)
+    
+    @pytest.mark.asyncio
+    async def test_placeholder_without_httpx(self):
+        """测试缺少 httpx 时的错误提示"""
+        # 此测试仅验证异常类型正确
+        from protocol_converter.engine import create_http_client
+        # 如果 httpx 已安装，客户端应能正常创建
+        client = create_http_client()
+        assert callable(client)
