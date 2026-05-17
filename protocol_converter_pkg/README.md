@@ -547,6 +547,29 @@ python3 examples/integration_test_all_9_paths.py
 
 ## 更新日志
 
+### v1.22.0
+
+基于官方文档、Context7 实时检索和 Python SDK（`openai-python` v2.11、`anthropic-sdk-python`）进行6轮深度审查后修复防御性改进：
+
+**第1-3轮 — 协议解析与字段映射逻辑缺陷：**
+
+- **`summary="omitted"` 映射完善**：engine._chat_to_anthropic_request 中之前仅处理 `concise/detailed` → `summarized`，遗漏了 `omitted` → `omitted` 的情况。现已补全
+
+**第4-6轮 — 异常处理遗漏与边界条件漏洞：**
+
+- **`_anthropic_to_chat_response` 类型防护**：添加 `isinstance(block, dict)` 检查，防止非字典元素导致 `AttributeError`
+
+- **`_convert_message` None 处理**：content 为 None 时不再转换为 `"None"` 字符串，而是直接返回空结果避免数据污染
+
+- **`audio_tokens` 字段名修复**：Anthropic usage 映射中之前错误使用 `audio_output_tokens`，现已修正为 `audio_tokens`（与官方 SDK 字段名对齐）
+
+- **`_anthropic_to_chat_response` content 迭代防护**：添加 `isinstance(block, dict)` 检查，确保安全迭代
+
+**测试覆盖：**
+
+- 全部 347 个单元测试通过
+- 3×3 全量 9 路集成测试全部通过
+
 ### v1.21.0
 
 基于官方文档、Context7 实时检索和 Python SDK（`openai-python` v2.11、`anthropic-sdk-python`）进行第3轮深度审查后修复异常处理遗漏与类型安全缺陷：
@@ -573,23 +596,9 @@ python3 examples/integration_test_all_9_paths.py
 
 - **`reasoning_effort` 新增 xhigh 级别支持**：`enabled` 类型 `budget_tokens >= 64000` 时现在正确映射为 `"xhigh"`，之前最高只能映射到 `"high"`
 
-- **`redacted_thinking` 加密内容判断修复**：Responses→Anthropic 转换中，之前 `if encrypted_content and not item.get("content")` 对空列表 `[]` 返回 False，导致应该转换为 `redacted_thinking` 的情况被错误处理。现正确检查是否有可见内容：
+- **`redacted_thinking` 加密内容判断修复**：Responses→Anthropic 转换中，之前 `if encrypted_content and not item.get("content")` 对空列表 `[]` 返回 False，导致应该转换为 `redacted_thinking` 的情况被错误处理。现正确检查是否有可见内容
 
-  ```python
-  has_visible_content = any(
-      c.get("type") == "reasoning_text" and c.get("text")
-      for c in content
-  ) or any(
-      s.get("type") == "summary_text" and s.get("text")
-      for s in summary
-  )
-  if encrypted_content and not has_visible_content:
-      # → redacted_thinking
-  ```
-
-- **`thinking.display` 往返转换完整保留**：Anthropic→Chat→Anthropic 往返转换中，`thinking.display` 字段之前在某些路径丢失。现已在以下位置修复：
-  - `engine._chat_to_anthropic_request`：从 `extra_body.thinking` 正确恢复 `enabled` 和 `adaptive` 类型的 `display` 字段
-  - `engine._anthropic_to_chat_response`：将 `redacted_thinking.data` 保留到 `reasoning_content` 中用于往返
+- **`thinking.display` 往返转换完整保留**：Anthropic→Chat→Anthropic 往返转换中，`thinking.display` 字段之前在某些路径丢失。现已在以下位置修复
 
 - **`adaptive` 类型处理修复**：`thinking.type="adaptive"` 且带 `budget_tokens` 时，现在按预算值正确映射到对应 `reasoning_effort` 级别（xhigh/high/medium/low），而非错误地默认 medium
 

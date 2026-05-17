@@ -1311,8 +1311,11 @@ class OpenAIResponsesConverter:
                     if summary is not None:
                         # "concise"/"detailed" → "summarized" (返回可见推理摘要)
                         # None/"auto" → 不设置 display (使用 Anthropic 默认行为)
+                        # "omitted" → "omitted" (不显示推理摘要)
                         if summary in ("concise", "detailed"):
                             thinking_config["display"] = "summarized"
+                        elif summary == "omitted":
+                            thinking_config["display"] = "omitted"
                     anthropic_request["thinking"] = thinking_config
                 else:
                     anthropic_request["thinking"] = {"type": "disabled"}

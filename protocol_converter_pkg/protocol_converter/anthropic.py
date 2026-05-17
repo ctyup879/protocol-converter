@@ -587,6 +587,8 @@ class AnthropicConverter:
                     result.append(tool_msg)
         
         else:
+            if content is None:
+                return result
             result.append({"role": openai_role, "content": str(content)})
         
         return result
@@ -822,7 +824,7 @@ class AnthropicConverter:
             # 提取 audio_tokens 输出
             audio_tokens_output = completion_tokens_details.get("audio_tokens", 0)
             if audio_tokens_output:
-                anthropic_usage["audio_output_tokens"] = audio_tokens_output
+                anthropic_usage["audio_tokens"] = audio_tokens_output
         
         # 从 Chat usage 额外字段中恢复 Anthropic 特有的 usage 数据（用于往返转换场景）
         if usage.get("cache_creation_input_tokens"):

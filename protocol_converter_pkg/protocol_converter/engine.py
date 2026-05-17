@@ -702,6 +702,8 @@ class ProtocolConverterEngine:
                         summary = original_reasoning["summary"]
                         if summary in ("concise", "detailed"):
                             thinking_config["display"] = "summarized"
+                        elif summary == "omitted":
+                            thinking_config["display"] = "omitted"
                 anthropic_request["thinking"] = thinking_config
             else:
                 anthropic_request["thinking"] = {"type": "disabled"}
@@ -890,6 +892,8 @@ class ProtocolConverterEngine:
         reasoning_content = None
         
         for block in content:
+            if not isinstance(block, dict):
+                continue
             if block.get("type") == "text":
                 text_val = block.get("text", "")
                 # 合并多个 text 块的内容，避免后覆盖前
