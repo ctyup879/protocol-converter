@@ -1352,6 +1352,7 @@ class OpenAIResponsesConverter:
                     anthropic_request["output_format"] = output_format
                 elif fmt_type == "json_object":
                     anthropic_request["output_format"] = {"type": "json_object"}
+                # Anthropic SDK: output_format 无 text 类型，text 类型表示无格式约束，不设置 output_format
         
         # 8. metadata.user_id
         metadata = request.get("metadata")
@@ -1373,9 +1374,9 @@ class OpenAIResponsesConverter:
                 anthropic_request["extra_body"] = {}
             anthropic_request["extra_body"]["verbosity"] = request["text"]["verbosity"]
         
-        # 9. service_tier 映射
+        # 9. service_tier 映射 (Ref: Anthropic API service_tier: "auto"|"standard_only")
         if request.get("service_tier"):
-            tier_map = {"default": "standard_only", "auto": "auto"}
+            tier_map = {"default": "standard_only", "auto": "auto", "flex": "standard_only", "scale": "standard_only", "priority": "standard_only"}
             anthropic_request["service_tier"] = tier_map.get(request["service_tier"], request["service_tier"])
         
         # 10. Responses 特有参数（Anthropic 不支持的，放入 extra_body）
@@ -1630,6 +1631,12 @@ class OpenAIResponsesConverter:
                 at = {"name": tool.get("name", ""), "input_schema": tool.get("parameters", {"type": "object", "properties": {}})}
                 if tool.get("description"):
                     at["description"] = tool["description"]
+                # Anthropic SDK ToolParam: strict 字段 (Ref: anthropic-sdk-python ToolParam)
+                if tool.get("strict") is not None:
+                    at["strict"] = tool["strict"]
+                # Anthropic SDK ToolParam: cache_control 字段 (Ref: anthropic-sdk-python ToolParam)
+                if tool.get("cache_control") is not None:
+                    at["cache_control"] = tool["cache_control"]
                 converted.append(at)
             # 其他 Responses 工具类型（web_search, file_search 等）Anthropic 不直接支持，跳过
         

@@ -264,20 +264,48 @@ class AnthropicConverter:
             elif fmt_type == "text":
                 chat_request["response_format"] = {"type": "text"}
         
+        # 6.6 处理 output_config.format 参数 (Ref: Anthropic SDK OutputConfigParam.format)
+        # output_config.format: {"type": "json_schema", "schema": {...}}
+        # 仅在 output_format 未设置时生效（output_format 优先级更高）
+        if "response_format" not in chat_request:
+            output_config = request.get("output_config")
+            if isinstance(output_config, dict):
+                oc_format = output_config.get("format")
+                if isinstance(oc_format, dict):
+                    oc_fmt_type = oc_format.get("type", "")
+                    if oc_fmt_type == "json_schema":
+                        json_schema = {}
+                        if oc_format.get("name"):
+                            json_schema["name"] = oc_format["name"]
+                        if oc_format.get("schema"):
+                            json_schema["schema"] = oc_format["schema"]
+                        if oc_format.get("strict") is not None:
+                            json_schema["strict"] = oc_format["strict"]
+                        if json_schema:
+                            chat_request["response_format"] = {
+                                "type": "json_schema",
+                                "json_schema": json_schema
+                            }
+                    elif oc_fmt_type == "json_object":
+                        chat_request["response_format"] = {"type": "json_object"}
+        
         # 7. 处理 thinking 参数 -> OpenAI reasoning_effort
         thinking = request.get("thinking")
         if thinking and isinstance(thinking, dict):
             thinking_type = thinking.get("type")
             if thinking_type == "enabled":
                 budget = thinking.get("budget_tokens", 0)
+                # Ref: OpenAI Chat API reasoning_effort: none|minimal|low|medium|high|xhigh
                 if budget >= 64000:
                     chat_request["reasoning_effort"] = "xhigh"
                 elif budget >= 32000:
                     chat_request["reasoning_effort"] = "high"
                 elif budget >= 10000:
                     chat_request["reasoning_effort"] = "medium"
-                else:
+                elif budget >= 1024:
                     chat_request["reasoning_effort"] = "low"
+                else:
+                    chat_request["reasoning_effort"] = "minimal"
             elif thinking_type == "adaptive":
                 # adaptive 类型 - Anthropic SDK 官方规范：ThinkingConfigAdaptiveParam 无 budget_tokens 字段
                 # 模型自主决定推理深度，默认 medium
@@ -285,19 +313,35 @@ class AnthropicConverter:
                 budget = thinking.get("budget_tokens")
                 if budget is not None:
                     # 非标准用法：按 budget 值做最低级别映射（保守处理）
+                    # Ref: OpenAI Chat API reasoning_effort: none|minimal|low|medium|high|xhigh
                     if budget >= 64000:
                         chat_request["reasoning_effort"] = "xhigh"
                     elif budget >= 32000:
                         chat_request["reasoning_effort"] = "high"
                     elif budget >= 10000:
                         chat_request["reasoning_effort"] = "medium"
-                    else:
+                    elif budget >= 1024:
                         chat_request["reasoning_effort"] = "low"
+                    else:
+                        chat_request["reasoning_effort"] = "minimal"
                 else:
                     # adaptive 官方行为：模型自主决定，默认 medium
                     chat_request["reasoning_effort"] = "medium"
             elif thinking_type == "disabled":
                 chat_request["reasoning_effort"] = "none"
+        
+        # 7.5 处理 output_config.effort 参数 (Ref: Anthropic SDK OutputConfigParam.effort)
+        # output_config.effort: "low"|"medium"|"high"|"xhigh"|"max"
+        # 仅在 thinking 未设置时生效（thinking 优先级更高）
+        if "reasoning_effort" not in chat_request:
+            output_config = request.get("output_config")
+            if isinstance(output_config, dict) and output_config.get("effort"):
+                effort = output_config["effort"]
+                # Anthropic "max" -> Chat "xhigh" (Ref: Anthropic SDK OutputConfigParam)
+                if effort == "max":
+                    chat_request["reasoning_effort"] = "xhigh"
+                elif effort in ("low", "medium", "high", "xhigh"):
+                    chat_request["reasoning_effort"] = effort
         
         # 8. Anthropic 特有参数（OpenAI 不直接支持的，放入 extra_body）
         extra = {}
@@ -677,6 +721,9 @@ class AnthropicConverter:
                 # Anthropic 用 input_schema, OpenAI 用 parameters
                 # Anthropic SDK: input_schema 是必填字段，但防御性处理缺失情况
                 func_def["parameters"] = tool.get("input_schema", {"type": "object", "properties": {}})
+                # Anthropic SDK ToolParam: strict 字段 (Ref: anthropic-sdk-python ToolParam)
+                if tool.get("strict") is not None:
+                    func_def["strict"] = tool["strict"]
                 converted.append({
                     "type": "function",
                     "function": func_def

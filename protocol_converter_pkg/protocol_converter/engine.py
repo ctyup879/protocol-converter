@@ -670,6 +670,9 @@ class ProtocolConverterEngine:
                     at = {"name": func.get("name", ""), "input_schema": func.get("parameters", {"type": "object", "properties": {}})}
                     if func.get("description"):
                         at["description"] = func["description"]
+                    # Anthropic SDK ToolParam: strict 字段 (Ref: anthropic-sdk-python ToolParam)
+                    if func.get("strict") is not None:
+                        at["strict"] = func["strict"]
                     anthropic_tools.append(at)
             if anthropic_tools:
                 anthropic_request["tools"] = anthropic_tools

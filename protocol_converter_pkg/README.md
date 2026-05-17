@@ -581,6 +581,34 @@ PYTHONPATH=. python3 examples/integration_test_responses_backend.py
 
 ## 更新日志
 
+### v1.31.0
+
+基于 OpenAI Chat Completions / OpenAI Responses / Anthropic Messages 三种 API 的官方规范（OpenAPI 3.1.0 spec、openai-python SDK、anthropic-sdk-python）进行深度审查与修正，确保转换代码与官方标准完全一致：
+
+**字段映射修正：**
+
+- **修复 `anthropic.py` thinking→reasoning_effort 的 `minimal` 级别缺失**：Anthropic `thinking.budget_tokens < 1024` 时之前映射为 `"low"`，但根据 Chat API 规范（`reasoning_effort` 支持 `"none"|"minimal"|"low"|"medium"|"high"|"xhigh"`），应映射为 `"minimal"`（Ref: OpenAI API `reasoning_effort` 枚举值）
+- **修复 `openai_responses.py` Responses→Anthropic `service_tier` 映射不完整**：`to_anthropic_request` 中 `tier_map` 仅包含 `"default"` → `"standard_only"` 和 `"auto"` → `"auto"`，遗漏 `"flex"` / `"scale"` / `"priority"` → `"standard_only"` 映射（Ref: Anthropic API `service_tier` 仅支持 `"auto"|"standard_only"`）
+- **修复 `anthropic.py` `output_config.effort` 字段未映射**：Anthropic `output_config.effort` 支持 `"low"|"medium"|"high"|"xhigh"|"max"`，应映射到 Chat `reasoning_effort`（其中 `"max"` → `"xhigh"`），仅在 `thinking` 未设置时生效（Ref: Anthropic SDK `OutputConfigParam.effort`）
+- **修复 `anthropic.py` `output_config.format` 字段未映射**：Anthropic `output_config.format` 支持 `{"type": "json_schema", "schema": {...}}` 格式，应映射到 Chat `response_format`，仅在 `output_format` 未设置时生效（Ref: Anthropic SDK `OutputConfigParam.format`）
+
+**工具定义字段补充：**
+
+- **修复 `anthropic.py` 工具转换缺少 `strict` 字段**：Anthropic `ToolParam` 支持 `strict: bool` 字段，但 `_convert_tools` 方法未传递该字段到 Chat `function.strict`（Ref: Anthropic SDK `ToolParam.strict`）
+- **修复 `openai_responses.py` Responses→Anthropic 工具转换缺少 `strict` 和 `cache_control` 字段**：`_convert_tools_to_anthropic` 方法未传递 Responses 工具的 `strict` 和 `cache_control` 字段（Ref: Anthropic SDK `ToolParam.strict` / `ToolParam.cache_control`）
+- **修复 `engine.py` Chat→Anthropic 工具转换缺少 `strict` 字段**：`_chat_to_anthropic_request` 方法中 Chat `function.strict` 未传递到 Anthropic 工具定义（Ref: Anthropic SDK `ToolParam.strict`）
+
+**涉及规范条款：**
+
+| 修正项 | 规范来源 | 条款 |
+|--------|---------|------|
+| reasoning_effort 枚举值 | OpenAI Chat Completions API | `CompletionCreateParams.reasoning_effort` |
+| service_tier 映射 | Anthropic Messages API | `MessageCreateParams.service_tier` |
+| output_config.effort | Anthropic SDK | `OutputConfigParam.effort` |
+| output_config.format | Anthropic SDK | `OutputConfigParam.format` |
+| ToolParam.strict | Anthropic SDK | `ToolParam.strict` |
+| ToolParam.cache_control | Anthropic SDK | `ToolParam.cache_control` |
+
 ### v1.30.0
 
 基于官方文档（OpenAI Chat/Responses API、Anthropic Messages API）、Context7 实时文档检索和 Python SDK（`openai-python` v2.11、`anthropic-sdk-python`）进行 6 轮深度审查与修复，确保转换逻辑与官方标准完全对齐：
