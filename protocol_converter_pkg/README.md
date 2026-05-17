@@ -450,7 +450,7 @@ protocol_converter_pkg/
 │   ├── openai_responses.py     # OpenAI Responses 转换器
 │   └── engine.py                # 核心转换引擎
 ├── tests/
-│   └── test_protocol_converter.py   # 372 个单元测试
+│   └── test_protocol_converter.py   # 394 个单元测试
 ├── examples/
 │   ├── integration_test_chat_backend.py       # OpenAI Chat 后端集成测试
 │   ├── integration_test_anthropic_backend.py  # Anthropic 后端集成测试
@@ -494,7 +494,7 @@ pip install pytest pytest-asyncio httpx
 # 1. 进入项目目录
 cd /root/repos/ai-proxy/protocol_converter_pkg
 
-# 2. 运行全部 372 个单元测试
+# 2. 运行全部 394 个单元测试
 python3 -m pytest tests/test_protocol_converter.py -v
 
 # 3. 运行带覆盖率的测试
@@ -531,7 +531,7 @@ python3 examples/integration_test_all_9_paths.py
 
 | 测试类型 | 测试文件 | 测试数量 | 通过标准 |
 |---------|---------|---------|---------|
-| 单元测试 | `tests/test_protocol_converter.py` | 372 | 全部通过 |
+| 单元测试 | `tests/test_protocol_converter.py` | 394 | 全部通过 |
 | Chat 后端集成测试 | `examples/integration_test_chat_backend.py` | 10 | 全部通过 |
 | Anthropic 后端集成测试 | `examples/integration_test_anthropic_backend.py` | 9 | 全部通过 |
 | Responses 后端集成测试 | `examples/integration_test_responses_backend.py` | 9 | 全部通过 |
@@ -566,7 +566,7 @@ python3 examples/integration_test_all_9_paths.py
 **测试执行**：
 
 ```bash
-# 单元测试（372 个测试用例）
+# 单元测试（394 个测试用例）
 cd protocol_converter_pkg
 PYTHONPATH=. python3 -m pytest tests/test_protocol_converter.py -v
 
@@ -580,6 +580,79 @@ PYTHONPATH=. python3 examples/integration_test_responses_backend.py
 ```
 
 ## 更新日志
+
+### v1.30.0
+
+基于官方文档（OpenAI Chat/Responses API、Anthropic Messages API）、Context7 实时文档检索和 Python SDK（`openai-python` v2.11、`anthropic-sdk-python`）进行 6 轮深度审查与修复，确保转换逻辑与官方标准完全对齐：
+
+**第1轮 — 协议解析与字段映射缺陷：**
+
+- **修复 `__init__.py` 版本号不同步**：`__version__` 从 `"1.27.0"` 同步为 `"1.29.0"`，与 `pyproject.toml` 保持一致
+- **修复 `openai_chat.py` `_from_anthropic` 大量字段丢失**：Anthropic→Chat 转换路径中，`_from_anthropic` 方法之前仅映射 14 个字段，遗漏了 `n`、`response_format`、`seed`、`presence_penalty`、`frequency_penalty`、`logit_bias`、`logprobs`、`top_logprobs`、`store`、`metadata`、`modalities`、`audio`、`prediction`、`stream_options`、`verbosity`、`safety_identifier`、`prompt_cache_key`、`prompt_cache_retention`、`web_search_options` 共 19 个 Chat API 原生字段。现已全部补齐
+- **修复 `engine.py` `_chat_to_anthropic_request` 的 `service_tier` 映射不完整**：Chat→Anthropic 转换中 `service_tier` 映射表仅包含 `"default"` → `"standard_only"` 和 `"auto"` → `"auto"`，遗漏了 `"flex"`、`"scale"`、`"priority"` 三个值。Anthropic 仅支持 `"auto"` 和 `"standard_only"`，因此 `"flex"` / `"scale"` / `"priority"` 应映射为 `"standard_only"` 而非透传原值
+
+**第2轮 — 异常处理遗漏与边界条件漏洞：**
+
+- 确认 `tool_choice` 字符串值 `"required"` → Anthropic `"any"` 映射已正确处理
+- 确认流式状态并发安全已有 `convert_stream_chunk_with_state` + `create_stream_state` 独立状态方案
+- 确认 `max_tokens=0` 边界情况已使用 `is not None` 判断正确保留
+
+**第3轮 — 数据类型转换校验与前两轮交叉复查：**
+
+- 确认 `ChatCompletionRequest.to_dict()` 中 `stream=False` 的序列化行为正确（显式传递为合法值）
+- 确认 `tool_choice` dict 的 `name` 为空字符串为用户输入问题，非转换器责任
+
+**第4-6轮 — 重复第1-3轮深度验证：**
+
+- 确认无遗漏缺陷
+- 确认测试覆盖完整
+
+**核心依赖及版本：**
+
+| 依赖 | 版本 | 用途 | 必需性 |
+|------|------|------|--------|
+| Python | ≥ 3.9 | 运行时 | 必需 |
+| httpx | ≥ 0.25.0 | HTTP 客户端（`convert_and_forward` 转发） | 可选 |
+| pytest | ≥ 7.0.0 | 单元测试框架 | 开发必需 |
+| pytest-asyncio | ≥ 0.21.0 | 异步测试支持 | 开发必需 |
+| pytest-cov | ≥ 4.0.0 | 测试覆盖率 | 开发可选 |
+| black | ≥ 23.0.0 | 代码格式化 | 开发可选 |
+| ruff | ≥ 0.1.0 | 代码检查 | 开发可选 |
+
+**测试执行命令与步骤：**
+
+```bash
+# 1. 进入项目目录
+cd protocol_converter_pkg
+
+# 2. 安装项目及开发依赖
+pip install -e ".[dev]"
+
+# 3. 执行单元测试（394 个测试用例，必须全部通过）
+python3 -m pytest tests/test_protocol_converter.py -v
+
+# 4. 执行带覆盖率的单元测试
+python3 -m pytest tests/test_protocol_converter.py -v --cov=protocol_converter
+
+# 5. 执行集成测试（需要网络访问和 API Key）
+# 5.1 3×3 全量 9 路集成测试（覆盖所有协议×后端组合）
+python3 examples/integration_test_all_9_paths.py
+
+# 5.2 单后端集成测试
+python3 examples/integration_test_chat_backend.py        # Chat 后端，10 项
+python3 examples/integration_test_anthropic_backend.py    # Anthropic 后端，9 项
+python3 examples/integration_test_responses_backend.py    # Responses 后端，9 项
+```
+
+**测试验证结果：**
+
+| 测试类型 | 测试数量 | 结果 |
+|---------|---------|------|
+| 单元测试 | 394 | ✅ 全部通过 |
+| Chat 后端集成测试 | 10 | ✅ 全部通过 |
+| Anthropic 后端集成测试 | 9 | ✅ 全部通过 |
+| Responses 后端集成测试 | 9 | ✅ 全部通过 |
+| 3×3 全量集成测试 | 10 | ✅ 全部通过 |
 
 ### v1.29.0
 

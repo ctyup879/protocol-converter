@@ -756,7 +756,13 @@ class ProtocolConverterEngine:
         # service_tier 映射
         service_tier = request.get("service_tier")
         if service_tier:
-            tier_map = {"default": "standard_only", "auto": "auto"}
+            tier_map = {
+                "default": "standard_only",
+                "auto": "auto",
+                "flex": "standard_only",
+                "scale": "standard_only",
+                "priority": "standard_only",
+            }
             anthropic_request["service_tier"] = tier_map.get(service_tier, service_tier)
         
         # inference_geo (Anthropic 特有)
