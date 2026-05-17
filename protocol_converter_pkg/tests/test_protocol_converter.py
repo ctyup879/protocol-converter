@@ -5441,7 +5441,7 @@ class TestAssistantThinkingOnlyBlock:
         assert result[0].get("reasoning_content") == "Thinking..."
 
     def test_assistant_redacted_thinking_only(self):
-        """assistant 消息只含 redacted_thinking 块时 content 为 None"""
+        """assistant 消息只含 redacted_thinking 块时 reasoning_content 保留 [redacted_thinking: data] 格式"""
         msg = {
             "role": "assistant",
             "content": [
@@ -5451,6 +5451,9 @@ class TestAssistantThinkingOnlyBlock:
         result = AnthropicConverter._convert_message(msg)
         assert len(result) == 1
         assert result[0]["role"] == "assistant"
+        # redacted_thinking 内容保留为 reasoning_content
+        assert result[0].get("reasoning_content") == "[redacted_thinking: encrypted_data]"
+        # content 应为 None（无可见文本）
         assert result[0]["content"] is None
 
 
@@ -6815,3 +6818,412 @@ class TestBugFixes:
         
         result = engine.convert_request(chat_request)
         assert "stop_sequences" not in result
+
+
+# ================================================================
+# v1.24.0 深度审查修复缺陷的回归测试 (7 项修复)
+# ================================================================
+
+class TestFix1InstructionsOrder:
+    """修复 #1: instructions 数组顺序不再被 reversed() 翻转"""
+
+    def test_instructions_array_order_preserved(self):
+        """instructions 为数组时，各项顺序应保持原始顺序"""
+        chat_request = {
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "instructions": [
+                {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "First instruction"}]},
+                {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "Second instruction"}]},
+                {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "Third instruction"}]},
+            ]
+        }
+        result = OpenAIResponsesConverter.to_openai_chat(chat_request)
+        # 第一个 developer/system 消息应包含 "First instruction"
+        system_msgs = [m for m in result["messages"] if m["role"] in ("system", "developer")]
+        assert len(system_msgs) >= 1
+        combined = system_msgs[0]["content"]
+        # "First instruction" 应出现在 "Third instruction" 之前
+        assert combined.find("First instruction") < combined.find("Third instruction")
+
+    def test_instructions_simple_string_order(self):
+        """instructions 为字符串时不受 reversed() 影响"""
+        chat_request = {
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "instructions": "You are a helpful assistant."
+        }
+        result = OpenAIResponsesConverter.to_openai_chat(chat_request)
+        system_msgs = [m for m in result["messages"] if m["role"] in ("system", "developer")]
+        assert len(system_msgs) >= 1
+        assert "helpful assistant" in system_msgs[0]["content"]
+
+
+class TestFix2RedactedThinkingPreserved:
+    """修复 #2: redacted_thinking 块不再被 pass 丢弃，data 字段保留用于往返转换"""
+
+    def test_redacted_thinking_data_preserved_in_convert_message(self):
+        """Anthropic redacted_thinking 块的 data 字段应保留在 reasoning_content 中"""
+        msg = {
+            "role": "assistant",
+            "content": [
+                {"type": "redacted_thinking", "data": "abc123encrypted"},
+                {"type": "text", "text": "Hello"}
+            ]
+        }
+        result = AnthropicConverter._convert_message(msg)
+        assert len(result) == 1
+        assert result[0]["reasoning_content"] == "[redacted_thinking: abc123encrypted]"
+
+    def test_redacted_thinking_signature_fallback_in_convert_message(self):
+        """redacted_thinking 块无 data 字段时，fallback 到 signature"""
+        msg = {
+            "role": "assistant",
+            "content": [
+                {"type": "redacted_thinking", "signature": "sig_fallback_value"},
+            ]
+        }
+        result = AnthropicConverter._convert_message(msg)
+        assert len(result) == 1
+        assert result[0]["reasoning_content"] == "[redacted_thinking: sig_fallback_value]"
+
+    def test_thinking_block_content_preserved(self):
+        """thinking 块的 thinking 字段应保留在 reasoning_content 中"""
+        msg = {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "Let me reason about this...", "signature": "sig123"},
+                {"type": "text", "text": "Answer"}
+            ]
+        }
+        result = AnthropicConverter._convert_message(msg)
+        assert len(result) == 1
+        assert result[0]["reasoning_content"] == "Let me reason about this..."
+
+
+class TestFix3RedactedThinkingInResponsesInput:
+    """修复 #3: [redacted_thinking: data] 格式正确映射为 Responses encrypted_content"""
+
+    def test_redacted_thinking_format_to_encrypted_content(self):
+        """[redacted_thinking: data] 格式应映射为 Responses reasoning 的 encrypted_content"""
+        result = OpenAIResponsesConverter._convert_reasoning_content_to_responses_input(
+            "[redacted_thinking: my_encrypted_data_123]"
+        )
+        assert result["type"] == "reasoning"
+        assert result["encrypted_content"] == "my_encrypted_data_123"
+        assert result["summary"] == []
+
+    def test_normal_reasoning_to_summary_text(self):
+        """普通 reasoning_content 应映射为 summary_text"""
+        result = OpenAIResponsesConverter._convert_reasoning_content_to_responses_input(
+            "Let me think about this step by step..."
+        )
+        assert result["type"] == "reasoning"
+        assert "encrypted_content" not in result
+        assert len(result["summary"]) == 1
+        assert result["summary"][0]["type"] == "summary_text"
+        assert result["summary"][0]["text"] == "Let me think about this step by step..."
+
+    def test_redacted_thinking_in_assistant_message_input(self):
+        """assistant 消息中的 [redacted_thinking: ...] reasoning_content 应转为 encrypted_content"""
+        chat_request = {
+            "model": "o3",
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {
+                    "role": "assistant",
+                    "content": "The answer is 42.",
+                    "reasoning_content": "[redacted_thinking: encrypted_xyz789]"
+                }
+            ]
+        }
+        result = OpenAIResponsesConverter.from_openai_chat_request(chat_request)
+        assert isinstance(result["input"], list)
+        reasoning_items = [item for item in result["input"] if item.get("type") == "reasoning"]
+        assert len(reasoning_items) == 1
+        assert reasoning_items[0]["encrypted_content"] == "encrypted_xyz789"
+        assert reasoning_items[0]["summary"] == []
+
+
+class TestFix4RedactedThinkingInResponsesResponse:
+    """修复 #4: Chat→Responses 响应转换中 [redacted_thinking: ...] 格式映射为 encrypted_content"""
+
+    def test_redacted_thinking_in_chat_response_to_responses(self):
+        """Chat 响应中 reasoning_content 为 [redacted_thinking: ...] 时应转为 Responses reasoning 的 encrypted_content"""
+        chat_response = {
+            "id": "chatcmpl-123",
+            "model": "o3",
+            "choices": [{
+                "message": {
+                    "content": "The answer is 42.",
+                    "reasoning_content": "[redacted_thinking: abc123encrypted]"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        }
+        result = OpenAIResponsesConverter.from_openai_chat(chat_response)
+        reasoning_items = [item for item in result["output"] if item.get("type") == "reasoning"]
+        assert len(reasoning_items) == 1
+        assert reasoning_items[0]["encrypted_content"] == "abc123encrypted"
+
+    def test_normal_reasoning_in_chat_response_to_responses(self):
+        """Chat 响应中普通 reasoning_content 应转为 reasoning_text 内容"""
+        chat_response = {
+            "id": "chatcmpl-123",
+            "model": "o3",
+            "choices": [{
+                "message": {
+                    "content": "The answer is 42.",
+                    "reasoning_content": "I thought about this carefully."
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        }
+        result = OpenAIResponsesConverter.from_openai_chat(chat_response)
+        reasoning_items = [item for item in result["output"] if item.get("type") == "reasoning"]
+        assert len(reasoning_items) == 1
+        # 普通推理应包含 reasoning_text 内容
+        assert "encrypted_content" not in reasoning_items[0]
+
+
+class TestFix5ThinkingDisplayToReasoningSummary:
+    """修复 #5: thinking.display → reasoning.summary 映射"""
+
+    def test_display_summarized_to_summary_concise(self):
+        """thinking.display='summarized' 应映射为 reasoning.summary='concise'"""
+        chat_request = {
+            "model": "claude-sonnet-4-20250514",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "reasoning_effort": "high",
+            "extra_body": {
+                "thinking": {"type": "enabled", "budget_tokens": 32000, "display": "summarized"}
+            }
+        }
+        result = OpenAIResponsesConverter.from_openai_chat_request(chat_request)
+        assert result.get("reasoning") is not None
+        assert result["reasoning"]["summary"] == "concise"
+
+    def test_display_omitted_to_summary_omitted(self):
+        """thinking.display='omitted' 应映射为 reasoning.summary='omitted'"""
+        chat_request = {
+            "model": "claude-sonnet-4-20250514",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "reasoning_effort": "high",
+            "extra_body": {
+                "thinking": {"type": "enabled", "budget_tokens": 32000, "display": "omitted"}
+            }
+        }
+        result = OpenAIResponsesConverter.from_openai_chat_request(chat_request)
+        assert result.get("reasoning") is not None
+        assert result["reasoning"]["summary"] == "omitted"
+
+    def test_no_display_no_summary(self):
+        """无 thinking.display 时，reasoning.summary 不应被设置"""
+        chat_request = {
+            "model": "claude-sonnet-4-20250514",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "reasoning_effort": "high",
+        }
+        result = OpenAIResponsesConverter.from_openai_chat_request(chat_request)
+        if result.get("reasoning"):
+            # 如果 reasoning 存在，summary 应该不是由 display 映射来的
+            assert result["reasoning"].get("summary") is None or result["reasoning"].get("summary") != "concise"
+
+
+class TestFix6UserToMetadataUserId:
+    """修复 #6: Responses→Anthropic 转换中 user 参数映射到 metadata.user_id"""
+
+    def test_user_to_metadata_user_id(self):
+        """Responses 请求中 user 参数应映射为 Anthropic metadata.user_id"""
+        request = {
+            "model": "gpt-4o",
+            "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Hello"}]}],
+            "user": "user_abc123"
+        }
+        result = OpenAIResponsesConverter.to_anthropic_request(request)
+        assert result.get("metadata") is not None
+        assert result["metadata"]["user_id"] == "user_abc123"
+
+    def test_no_user_no_metadata_user_id(self):
+        """无 user 参数时，不应设置 metadata.user_id"""
+        request = {
+            "model": "gpt-4o",
+            "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Hello"}]}],
+        }
+        result = OpenAIResponsesConverter.to_anthropic_request(request)
+        # metadata.user_id 不应被设置（除非有其他 metadata 来源）
+        if result.get("metadata"):
+            assert result["metadata"].get("user_id") is None
+
+    def test_user_preserves_existing_metadata(self):
+        """user 参数映射到 metadata.user_id 时，已有 metadata 的其他字段应保留在 extra_body 中"""
+        request = {
+            "model": "gpt-4o",
+            "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Hello"}]}],
+            "user": "user_abc123",
+            "metadata": {"custom_field": "custom_value"}
+        }
+        result = OpenAIResponsesConverter.to_anthropic_request(request)
+        assert result["metadata"]["user_id"] == "user_abc123"
+        # Anthropic API 仅支持 metadata.user_id，其他字段保留在 extra_body.metadata 中
+        assert result.get("extra_body", {}).get("metadata", {}).get("custom_field") == "custom_value"
+
+
+class TestFix7StreamCompletionEvents:
+    """修复 #7: Responses 后端流式 response.completed/failed/incomplete 事件不再被静默丢弃"""
+
+    def test_response_completed_event_produces_chat_chunk(self):
+        """response.completed 事件应正确转换为 Chat 流式块（含 finish_reason）"""
+        data = {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_123",
+                "model": "gpt-4o",
+                "status": "completed",
+                "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+            }
+        }
+        result = OpenAIResponsesConverter._convert_responses_event_to_chat_chunk("response.completed", data)
+        assert result is not None
+        assert result["choices"][0]["finish_reason"] == "stop"
+        assert result["usage"]["prompt_tokens"] == 10
+
+    def test_response_failed_event_produces_chat_chunk(self):
+        """response.failed 事件应正确转换为 Chat 流式块"""
+        data = {
+            "type": "response.failed",
+            "response": {
+                "id": "resp_456",
+                "model": "gpt-4o",
+                "status": "failed",
+                "error": {"code": "server_error", "message": "Internal server error"}
+            }
+        }
+        result = OpenAIResponsesConverter._convert_responses_event_to_chat_chunk("response.failed", data)
+        assert result is not None
+        assert result["choices"][0]["finish_reason"] == "stop"
+
+    def test_response_incomplete_event_produces_chat_chunk(self):
+        """response.incomplete 事件应正确转换为 Chat 流式块（含 finish_reason=length）"""
+        data = {
+            "type": "response.incomplete",
+            "response": {
+                "id": "resp_789",
+                "model": "gpt-4o",
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+            }
+        }
+        result = OpenAIResponsesConverter._convert_responses_event_to_chat_chunk("response.incomplete", data)
+        assert result is not None
+        assert result["choices"][0]["finish_reason"] == "length"
+
+    def test_response_completed_with_usage(self):
+        """response.completed 事件应包含完整的 usage 信息"""
+        data = {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_usage_test",
+                "model": "gpt-4o",
+                "status": "completed",
+                "usage": {"input_tokens": 100, "output_tokens": 50, "total_tokens": 150}
+            }
+        }
+        result = OpenAIResponsesConverter._convert_responses_event_to_chat_chunk("response.completed", data)
+        assert result is not None
+        assert result["usage"]["prompt_tokens"] == 100
+        assert result["usage"]["completion_tokens"] == 50
+        assert result["usage"]["total_tokens"] == 150
+
+
+class TestRedactedThinkingFullRoundTrip:
+    """完整往返转换测试: Anthropic → Chat → Responses → Chat → Anthropic"""
+
+    def test_anthropic_to_chat_preserves_redacted_thinking(self):
+        """Anthropic 响应中 redacted_thinking 通过 Chat reasoning_content 保留"""
+        anthropic_response = {
+            "id": "msg_rt1",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "redacted_thinking", "data": "rt_encrypted_001"},
+                {"type": "text", "text": "Hello from Claude"}
+            ],
+            "model": "claude-sonnet-4-20250514",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        }
+        
+        # Anthropic → Chat (通过 engine)
+        config = ConverterConfig(backend_type="anthropic")
+        engine = ProtocolConverterEngine(config)
+        chat_response = engine._anthropic_to_chat_response(anthropic_response)
+        assert chat_response["choices"][0]["message"]["reasoning_content"] == "[redacted_thinking: rt_encrypted_001]"
+        
+        # Chat → Anthropic (还原)
+        anthropic_back = AnthropicConverter.from_openai_chat(chat_response)
+        redacted_blocks = [b for b in anthropic_back["content"] if b["type"] == "redacted_thinking"]
+        assert len(redacted_blocks) == 1
+        assert redacted_blocks[0]["data"] == "rt_encrypted_001"
+
+    def test_anthropic_to_responses_preserves_encrypted_content(self):
+        """Anthropic 响应中 redacted_thinking 通过 Responses encrypted_content 保留"""
+        anthropic_response = {
+            "id": "msg_rt2",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "redacted_thinking", "data": "rt_encrypted_002"},
+                {"type": "text", "text": "Hello from Claude"}
+            ],
+            "model": "claude-sonnet-4-20250514",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        }
+        
+        # Anthropic → Responses
+        responses_result = AnthropicConverter.to_openai_responses(anthropic_response)
+        reasoning_items = [item for item in responses_result["output"] if item.get("type") == "reasoning"]
+        assert len(reasoning_items) == 1
+        assert reasoning_items[0]["encrypted_content"] == "rt_encrypted_002"
+
+    def test_responses_to_chat_preserves_encrypted_content(self):
+        """Responses reasoning 的 encrypted_content 通过 Chat reasoning_content 保留"""
+        responses_response = {
+            "id": "resp_rt3",
+            "object": "response",
+            "status": "completed",
+            "created_at": 1234567890,
+            "model": "gpt-4o",
+            "output": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_rt3",
+                    "content": [],
+                    "summary": [],
+                    "encrypted_content": "rt_encrypted_003",
+                    "status": "completed"
+                },
+                {
+                    "type": "message",
+                    "id": "msg_rt3",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "Hello"}]
+                }
+            ],
+            "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+        }
+        
+        # Responses → Chat
+        chat_response = OpenAIResponsesConverter.to_chat_response(responses_response)
+        assert chat_response["choices"][0]["message"]["reasoning_content"] == "[redacted_thinking: rt_encrypted_003]"
+        
+        # Chat → Anthropic (还原)
+        anthropic_back = AnthropicConverter.from_openai_chat(chat_response)
+        redacted_blocks = [b for b in anthropic_back["content"] if b["type"] == "redacted_thinking"]
+        assert len(redacted_blocks) == 1
+        assert redacted_blocks[0]["data"] == "rt_encrypted_003"

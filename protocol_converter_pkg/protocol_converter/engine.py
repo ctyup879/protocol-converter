@@ -1333,22 +1333,32 @@ class ProtocolConverterEngine:
                             continue
                         # Responses→Chat/Anthropic: Responses 后端返回 Responses 格式事件
                         event_type = current_event_type
-                        if event_type and event_type not in ("response.created", "response.in_progress", "response.completed", "response.failed", "response.incomplete", "response.ping"):
-                            # 对于输出事件，尝试转换为 Chat 流式块
-                            chat_chunk = self.openai_responses._convert_responses_event_to_chat_chunk(event_type, chunk)
-                            if chat_chunk:
-                                stream_chunks = self.convert_stream_chunk_multi(chat_chunk, source_protocol)
-                                for sc in stream_chunks:
-                                    if source_protocol == Protocol.ANTHROPIC:
-                                        yield sc.to_anthropic_sse()
-                                    elif source_protocol == Protocol.OPENAI_RESPONSES:
-                                        yield sc.to_sse()
-                                    else:
-                                        yield sc.to_openai_chunk()
-                                continue
-                        elif event_type in ("response.completed", "response.failed", "response.incomplete"):
-                            # 完成/失败/不完整事件 - 提取 usage 信息
-                            pass
+                        if event_type and event_type not in ("response.created", "response.in_progress", "response.ping"):
+                            if event_type in ("response.completed", "response.failed", "response.incomplete"):
+                                # 完成/失败/不完整事件 - 转换为 Chat 格式流式块并发送
+                                chat_chunk = self.openai_responses._convert_responses_event_to_chat_chunk(event_type, chunk)
+                                if chat_chunk:
+                                    stream_chunks = self.convert_stream_chunk_multi(chat_chunk, source_protocol)
+                                    for sc in stream_chunks:
+                                        if source_protocol == Protocol.ANTHROPIC:
+                                            yield sc.to_anthropic_sse()
+                                        elif source_protocol == Protocol.OPENAI_RESPONSES:
+                                            yield sc.to_sse()
+                                        else:
+                                            yield sc.to_openai_chunk()
+                            else:
+                                # 对于其他输出事件，尝试转换为 Chat 流式块
+                                chat_chunk = self.openai_responses._convert_responses_event_to_chat_chunk(event_type, chunk)
+                                if chat_chunk:
+                                    stream_chunks = self.convert_stream_chunk_multi(chat_chunk, source_protocol)
+                                    for sc in stream_chunks:
+                                        if source_protocol == Protocol.ANTHROPIC:
+                                            yield sc.to_anthropic_sse()
+                                        elif source_protocol == Protocol.OPENAI_RESPONSES:
+                                            yield sc.to_sse()
+                                        else:
+                                            yield sc.to_openai_chunk()
+                            continue
                     
                     # OpenAI Chat 后端
                     if backend_format == "openai_chat" and source_protocol == Protocol.OPENAI_CHAT:

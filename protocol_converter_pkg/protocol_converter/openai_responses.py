@@ -191,7 +191,7 @@ class OpenAIResponsesConverter:
                 # 收集多模态内容块，最后合并为单条 developer 消息
                 inst_content_parts = []
                 inst_text_parts = []
-                for inst_item in reversed(instructions):
+                for inst_item in instructions:
                     if isinstance(inst_item, dict):
                         inst_type = inst_item.get("type", "")
                         if inst_type == "message":
@@ -914,11 +914,7 @@ class OpenAIResponsesConverter:
                     # 处理 reasoning_content -> reasoning 输入项
                     reasoning_content = msg.get("reasoning_content")
                     if reasoning_content:
-                        input_items.append({
-                            "type": "reasoning",
-                            "id": f"rs_{uuid.uuid4().hex[:24]}",
-                            "summary": [{"type": "summary_text", "text": reasoning_content}]
-                        })
+                        input_items.append(cls._convert_reasoning_content_to_responses_input(reasoning_content))
                     if content:
                         if isinstance(content, str):
                             input_items.append({
@@ -955,11 +951,7 @@ class OpenAIResponsesConverter:
                 elif isinstance(content, str):
                     # 处理 assistant 消息的 reasoning_content
                     if role == "assistant" and msg.get("reasoning_content"):
-                        input_items.append({
-                            "type": "reasoning",
-                            "id": f"rs_{uuid.uuid4().hex[:24]}",
-                            "summary": [{"type": "summary_text", "text": msg["reasoning_content"]}]
-                        })
+                        input_items.append(cls._convert_reasoning_content_to_responses_input(msg["reasoning_content"]))
                     if content:
                         input_items.append({
                             "type": "message",
@@ -978,11 +970,7 @@ class OpenAIResponsesConverter:
                     # 多模态内容
                     # 处理 assistant 消息的 reasoning_content（列表内容场景）
                     if role == "assistant" and msg.get("reasoning_content"):
-                        input_items.append({
-                            "type": "reasoning",
-                            "id": f"rs_{uuid.uuid4().hex[:24]}",
-                            "summary": [{"type": "summary_text", "text": msg["reasoning_content"]}]
-                        })
+                        input_items.append(cls._convert_reasoning_content_to_responses_input(msg["reasoning_content"]))
                     content_items = cls._convert_chat_content_to_responses(content)
                     if content_items:
                         input_items.append({
@@ -994,11 +982,7 @@ class OpenAIResponsesConverter:
                     # content 为 None（常见于 assistant + tool_calls 场景，但此处无 tool_calls）
                     if role == "assistant" and msg.get("reasoning_content"):
                         # 有推理内容 → 创建 reasoning 输入项
-                        input_items.append({
-                            "type": "reasoning",
-                            "id": f"rs_{uuid.uuid4().hex[:24]}",
-                            "summary": [{"type": "summary_text", "text": msg["reasoning_content"]}]
-                        })
+                        input_items.append(cls._convert_reasoning_content_to_responses_input(msg["reasoning_content"]))
                     elif role == "assistant":
                         # assistant 无内容也无推理，创建空消息保持消息序列
                         input_items.append({
@@ -1093,6 +1077,18 @@ class OpenAIResponsesConverter:
                         reasoning_config["summary"] = original_reasoning["summary"]
                     if original_reasoning.get("generate_summary") is not None:
                         reasoning_config["generate_summary"] = original_reasoning["generate_summary"]
+                # 如果 extra_body.thinking 中有 display 字段，映射为 reasoning.summary
+                # Anthropic thinking.display -> Responses reasoning.summary
+                # display="summarized" -> summary="concise"
+                # display="omitted" -> summary="omitted"
+                if "summary" not in reasoning_config:
+                    original_thinking = request["extra_body"].get("thinking")
+                    if isinstance(original_thinking, dict) and original_thinking.get("display"):
+                        display = original_thinking["display"]
+                        if display == "summarized":
+                            reasoning_config["summary"] = "concise"
+                        elif display == "omitted":
+                            reasoning_config["summary"] = "omitted"
             responses_request["reasoning"] = reasoning_config
         
         # response_format -> text
@@ -1411,7 +1407,11 @@ class OpenAIResponsesConverter:
         if request.get("prompt_cache_retention"):
             extra["prompt_cache_retention"] = request["prompt_cache_retention"]
         if request.get("user"):
-            extra["user"] = request["user"]
+            # Responses user -> Anthropic metadata.user_id
+            if "metadata" not in anthropic_request:
+                anthropic_request["metadata"] = {}
+            if "user_id" not in anthropic_request["metadata"]:
+                anthropic_request["metadata"]["user_id"] = request["user"]
         if request.get("top_logprobs") is not None:
             extra["top_logprobs"] = request["top_logprobs"]
         # reasoning.generate_summary 保留（请求参数，非 Anthropic 原生支持）
@@ -1690,6 +1690,31 @@ class OpenAIResponsesConverter:
         return result
     
     @classmethod
+    def _convert_reasoning_content_to_responses_input(cls, reasoning_content: str) -> Dict[str, Any]:
+        """转换 Chat reasoning_content 为 Responses reasoning 输入项
+        
+        识别 [redacted_thinking: data] 格式，正确映射为 encrypted_content；
+        其他情况映射为 summary_text。
+        """
+        # 检测 [redacted_thinking: data] 格式
+        if (isinstance(reasoning_content, str)
+                and reasoning_content.startswith("[redacted_thinking: ")
+                and reasoning_content.endswith("]")):
+            encrypted_data = reasoning_content[20:-1]
+            return {
+                "type": "reasoning",
+                "id": f"rs_{uuid.uuid4().hex[:24]}",
+                "summary": [],
+                "encrypted_content": encrypted_data,
+            }
+        else:
+            return {
+                "type": "reasoning",
+                "id": f"rs_{uuid.uuid4().hex[:24]}",
+                "summary": [{"type": "summary_text", "text": reasoning_content}],
+            }
+    
+    @classmethod
     def _convert_chat_tools_to_responses(cls, tools: List[Dict]) -> List[Dict]:
         """转换 Chat 工具定义为 Responses 格式"""
         result = []
@@ -1782,16 +1807,30 @@ class OpenAIResponsesConverter:
             
             # 处理推理内容 -> reasoning 输出项
             if reasoning_content:
-                output.append({
-                    "type": "reasoning",
-                    "id": f"rs_{uuid.uuid4().hex[:24]}",
-                    "content": [{
-                        "type": "reasoning_text",
-                        "text": reasoning_content
-                    }],
-                    "summary": [],  # Responses API: summary 是必填字段 (List[Summary])
-                    "status": "completed"
-                })
+                # 检测 [redacted_thinking: data] 格式，正确映射为 encrypted_content
+                if (isinstance(reasoning_content, str)
+                        and reasoning_content.startswith("[redacted_thinking: ")
+                        and reasoning_content.endswith("]")):
+                    encrypted_data = reasoning_content[20:-1]
+                    output.append({
+                        "type": "reasoning",
+                        "id": f"rs_{uuid.uuid4().hex[:24]}",
+                        "content": [],
+                        "summary": [],
+                        "encrypted_content": encrypted_data,
+                        "status": "completed"
+                    })
+                else:
+                    output.append({
+                        "type": "reasoning",
+                        "id": f"rs_{uuid.uuid4().hex[:24]}",
+                        "content": [{
+                            "type": "reasoning_text",
+                            "text": reasoning_content
+                        }],
+                        "summary": [],  # Responses API: summary 是必填字段 (List[Summary])
+                        "status": "completed"
+                    })
             
             # 处理工具调用（先输出 function_call，再输出 message）
             tool_calls = message.get("tool_calls", [])

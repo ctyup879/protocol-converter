@@ -386,6 +386,7 @@ class AnthropicConverter:
             tool_calls = []
             tool_results = []
             has_multimodal = False
+            thinking_texts = []  # 收集 thinking/redacted_thinking 内容
             
             for block in content:
                 if not isinstance(block, dict):
@@ -425,13 +426,17 @@ class AnthropicConverter:
                     tool_results.append(block)
                 
                 elif block_type == "thinking":
-                    # thinking 块 - OpenAI 不直接支持相同格式
-                    # 跳过，但记录存在（如果后端支持 reasoning_effort 会自动处理）
-                    pass
+                    # thinking 块 - 收集推理内容用于 reasoning_content
+                    thinking_text = block.get("thinking", "")
+                    if thinking_text:
+                        thinking_texts.append(thinking_text)
                 
                 elif block_type == "redacted_thinking":
-                    # 脱敏思考块 - 跳过
-                    pass
+                    # 脱敏思考块 - 保留 data 字段用于往返转换
+                    # 与 engine._anthropic_to_chat_response 中的处理一致
+                    redacted_data = block.get("data") or block.get("signature", "")
+                    if redacted_data:
+                        thinking_texts.append(f"[redacted_thinking: {redacted_data}]")
                 
                 elif block_type == "image":
                     # 图片块 - 正确转换为 OpenAI image_url 格式
@@ -558,15 +563,8 @@ class AnthropicConverter:
                     assistant_msg["content"] = None
                 if tool_calls:
                     assistant_msg["tool_calls"] = tool_calls
-                # 将 thinking 块内容映射为 reasoning_content（OpenAI o系列格式）
-                # Chat API 支持同时包含 content 和 reasoning_content，不应仅在无文本时保留
-                thinking_texts = []
-                for block in content if isinstance(content, list) else []:
-                    if isinstance(block, dict):
-                        if block.get("type") == "thinking":
-                            t = block.get("thinking", "")
-                            if t:
-                                thinking_texts.append(t)
+                # 将 thinking/redacted_thinking 块内容映射为 reasoning_content（OpenAI o系列格式）
+                # thinking_texts 已在循环中收集（包括 thinking 和 redacted_thinking 块）
                 if thinking_texts:
                     assistant_msg["reasoning_content"] = "\n".join(thinking_texts)
                 result.append(assistant_msg)

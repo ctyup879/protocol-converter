@@ -7,12 +7,12 @@
 ## 功能特性
 
 - **自动检测**请求协议类型（OpenAI Chat / OpenAI Responses / Anthropic）
-- **请求转换**：任意协议 → 任意协议（6 种转换路径）
+- **请求转换**：任意协议 → 任意协议（6 种转换路径）+ 直接转换路径（Anthropic↔Responses、Chat↔Responses）
 - **响应转换**：后端响应 → 客户端协议格式
 - **流式支持**：完整的 SSE 流式转换，严格遵循各协议事件序列（含 `content_block_start/stop`、`output_item.added/done`、`reasoning_summary_text.delta/done`、`refusal.delta/done` 等）
 - **工具调用**：完整支持 function calling / tool_use / tool_result 跨协议转换
-- **扩展思考**：Anthropic `thinking` ↔ OpenAI `reasoning_effort` / `reasoning_content` 双向映射（含 `adaptive`、`display`）
-- **Responses 推理输出**：`reasoning` 类型输出项（含 `reasoning_text`）→ Chat `reasoning_content` 字段
+- **扩展思考**：Anthropic `thinking` ↔ OpenAI `reasoning_effort` / `reasoning_content` 双向映射（含 `adaptive`、`display`），`redacted_thinking` 通过 `[redacted_thinking: data]` 格式实现三方完整往返转换
+- **Responses 推理输出**：`reasoning` 类型输出项（含 `reasoning_text`、`encrypted_content`）→ Chat `reasoning_content` 字段，支持 `thinking.display` ↔ `reasoning.summary` 映射
 - **developer 角色降级**：目标后端不支持 `developer` 角色时自动降级为 `system`
 - **多模态**：图片（base64 / URL）、文档（PDF）、文件输入转换
 - **Structured Outputs 往返**：Responses `text.format` ↔ Chat `response_format` ↔ Anthropic `output_format` 的 `json_schema` 格式正确互转，支持 `name`/`schema`/`strict` 字段完整映射
@@ -366,7 +366,7 @@ config = ConverterConfig(
 | `tool_result` | `{"role":"tool","tool_call_id","content"}` | `{"type":"function_call_output","call_id","output"}` |
 | `tool_result(is_error)` | `{"role":"tool","content":"[Error]..."}` | — |
 | `thinking` | `reasoning_content` | `{"type":"reasoning","content":[{"type":"reasoning_text"}]}` |
-| `redacted_thinking` | （跳过） | `{"type":"reasoning","content":[],"encrypted_content":"..."}` |
+| `redacted_thinking` | `reasoning_content` = `[redacted_thinking: data]` | `{"type":"reasoning","content":[],"encrypted_content":"..."}` |
 | `server_tool_use` | `tool_calls[...]` | `{"type":"function_call",...}` |
 
 ## 流式转换
@@ -450,7 +450,7 @@ protocol_converter_pkg/
 │   ├── openai_responses.py     # OpenAI Responses 转换器
 │   └── engine.py                # 核心转换引擎
 ├── tests/
-│   └── test_protocol_converter.py   # 347 个单元测试
+│   └── test_protocol_converter.py   # 372 个单元测试
 ├── examples/
 │   ├── integration_test_chat_backend.py       # OpenAI Chat 后端集成测试
 │   ├── integration_test_anthropic_backend.py  # Anthropic 后端集成测试
@@ -494,7 +494,7 @@ pip install pytest pytest-asyncio httpx
 # 1. 进入项目目录
 cd /root/repos/ai-proxy/protocol_converter_pkg
 
-# 2. 运行全部 347 个单元测试
+# 2. 运行全部 372 个单元测试
 python3 -m pytest tests/test_protocol_converter.py -v
 
 # 3. 运行带覆盖率的测试
@@ -531,7 +531,7 @@ python3 examples/integration_test_all_9_paths.py
 
 | 测试类型 | 测试文件 | 测试数量 | 通过标准 |
 |---------|---------|---------|---------|
-| 单元测试 | `tests/test_protocol_converter.py` | 347 | 全部通过 |
+| 单元测试 | `tests/test_protocol_converter.py` | 372 | 全部通过 |
 | Chat 后端集成测试 | `examples/integration_test_chat_backend.py` | 8 | 全部通过 |
 | Anthropic 后端集成测试 | `examples/integration_test_anthropic_backend.py` | 7 | 全部通过 |
 | Responses 后端集成测试 | `examples/integration_test_responses_backend.py` | 7 | 全部通过 |
@@ -549,12 +549,13 @@ python3 examples/integration_test_all_9_paths.py
 
 | 版本 | 日期 | 说明 |
 |------|------|------|
-| **v1.24.0** | 2026-05-17 | 6 轮深度审查修复：`minimal` 推理映射修正、`redacted_thinking` 往返转换、空 input 容错、`stop` 空值过滤、工具 `input_schema` 默认值 |
+| **v1.25.0** | 2026-05-17 | 7 项深度审查修复：instructions 顺序修正、redacted_thinking 往返转换完善、reasoning_content→Responses encrypted_content 映射、thinking.display→reasoning.summary 映射、user→metadata.user_id 映射、流式完成事件转换 |
+| v1.24.0 | — | 6 轮深度审查修复：`minimal` 推理映射修正、`redacted_thinking` 往返转换、空 input 容错、`stop` 空值过滤、工具 `input_schema` 默认值 |
 | v1.23.0 | — | 6 轮审查修复：`reasoning_effort` 映射、`output_format` 逆向映射、`service_tier` 映射、流式 reasoning 转换等 |
 | v1.17.0 | — | 3 轮审查修复：`text.verbosity` 双向映射、`generate_summary` 往返、`cache_control` 保留等 |
 | v1.0.0 | — | 初始版本：9 路转换矩阵、流式 SSE、工具调用、多模态支持 |
 
-**当前版本**：`1.24.0`（同步更新于 `pyproject.toml` 和 `protocol_converter/__init__.py`）
+**当前版本**：`1.25.0`（同步更新于 `pyproject.toml` 和 `protocol_converter/__init__.py`）
 
 **核心依赖**：
 - Python ≥ 3.9
@@ -564,7 +565,7 @@ python3 examples/integration_test_all_9_paths.py
 **测试执行**：
 
 ```bash
-# 单元测试（354 个测试用例）
+# 单元测试（372 个测试用例）
 cd protocol_converter_pkg
 PYTHONPATH=. python3 -m pytest tests/test_protocol_converter.py -v
 
@@ -578,6 +579,34 @@ PYTHONPATH=. python3 examples/integration_test_responses_backend.py
 ```
 
 ## 更新日志
+
+### v1.25.0
+
+基于官方文档、Context7 实时检索和 Python SDK（`openai-python` v2.11、`anthropic-sdk-python`）深度审查后修复 7 项关键缺陷：
+
+**协议解析与字段映射修复：**
+
+- **Fix #1: instructions 数组顺序修正**：`OpenAIResponsesConverter.to_openai_chat` 中 `instructions` 为数组时，`reversed()` 调用导致项顺序翻转（最后一条变为第一条）。已移除 `reversed()`，保持原始顺序
+- **Fix #2: redacted_thinking 块数据保留**：`AnthropicConverter._convert_message` 中 `redacted_thinking` 块之前被 `pass` 静默丢弃，脱敏思考数据完全丢失。现已保留 `data` 字段（fallback `signature`）到 `reasoning_content`，使用 `[redacted_thinking: data]` 格式标记，确保三方往返转换完整
+- **Fix #3: reasoning_content→Responses 输入项 encrypted_content 映射**：新增 `_convert_reasoning_content_to_responses_input()` 方法，识别 `[redacted_thinking: data]` 格式并映射为 Responses `reasoning` 输入项的 `encrypted_content`（而非错误地映射为 `summary_text`）
+- **Fix #4: Chat→Responses 响应转换中 redacted_thinking 检测**：`from_openai_chat()` 响应转换中 `reasoning_content` 为 `[redacted_thinking: ...]` 格式时，正确映射为 Responses reasoning 输出项的 `encrypted_content`
+
+**参数映射修复：**
+
+- **Fix #5: thinking.display→reasoning.summary 映射**：`from_openai_chat_request()` 在 Chat→Responses 请求转换中，当 `extra_body.thinking.display` 存在时，正确映射为 Responses `reasoning.summary`（`display="summarized"` → `summary="concise"`，`display="omitted"` → `summary="omitted"`）
+- **Fix #6: user→metadata.user_id 映射**：`to_anthropic_request()` 中 Responses 请求的 `user` 参数正确映射为 Anthropic `metadata.user_id`（之前错误地放入 `extra_body`，丢失语义）
+
+**流式转换修复（关键）：**
+
+- **Fix #7: Responses 后端流式完成/失败事件转换**：`_handle_stream_response()` 中 `response.completed`/`response.failed`/`response.incomplete` 事件之前被 `pass` 静默丢弃，导致 Responses 后端流式响应永远不会终止。现已正确转换为 Chat 格式流式块（含 `finish_reason`），确保流式转换完整结束
+
+**测试验证：**
+
+- 372 个单元测试全部通过（新增 23 个覆盖上述修复，含完整往返转换测试）
+- 3×3 全量 9 路集成测试全部通过
+- Chat 后端集成测试全部通过（8 项）
+- Anthropic 后端集成测试全部通过（7 项）
+- Responses 后端集成测试全部通过（7 项）
 
 ### v1.24.0
 
