@@ -42,6 +42,13 @@ RESPONSES_CONFIG = ConverterConfig(
     api_key="REDACTED_OPENROUTER_API_KEY",
     default_model="openai/gpt-oss-120b:free",
     timeout=60.0,
+    model_mapping={
+        "gpt-4o": "openai/gpt-oss-120b:free",
+        "gpt-4o-mini": "openai/gpt-oss-120b:free",
+        "claude-sonnet-4-20250514": "openai/gpt-oss-120b:free",
+        "claude-opus-4-6": "openai/gpt-oss-120b:free",
+        "MiniMax-M2.7": "openai/gpt-oss-120b:free",
+    },
 )
 
 engine = ProtocolConverterEngine(RESPONSES_CONFIG)
@@ -462,7 +469,6 @@ async def test_stream_chat_to_responses_backend():
     }
     
     converted = engine.convert_request(chat_request)
-    converted["model"] = RESPONSES_CONFIG.default_model
     converted["stream"] = True
     
     try:
@@ -523,7 +529,6 @@ async def test_stream_anthropic_to_responses_backend():
     }
     
     converted = engine.convert_request(anthropic_request)
-    converted["model"] = RESPONSES_CONFIG.default_model
     converted["stream"] = True
     
     try:

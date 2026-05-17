@@ -477,7 +477,6 @@ async def test_streaming_responses_to_chat():
         }
         
         converted = engine.convert_request(responses_request)
-        converted["model"] = CONFIG.default_model
         converted["stream"] = True
         converted["stream_options"] = {"include_usage": True}
         
@@ -532,7 +531,6 @@ async def test_streaming_anthropic_to_chat():
         }
         
         converted = engine.convert_request(anthropic_request)
-        converted["model"] = CONFIG.default_model
         converted["stream"] = True
         converted["stream_options"] = {"include_usage": True}
         

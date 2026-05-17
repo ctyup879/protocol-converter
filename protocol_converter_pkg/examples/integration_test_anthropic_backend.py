@@ -473,7 +473,6 @@ async def test_stream_chat_to_anthropic_backend():
     }
     
     converted = engine_anthropic.convert_request(chat_request)
-    converted["model"] = CONFIG_ANTHROPIC.default_model
     converted["stream"] = True
     
     try:
@@ -533,7 +532,6 @@ async def test_stream_responses_to_anthropic_backend():
     }
     
     converted = engine_anthropic.convert_request(responses_request)
-    converted["model"] = CONFIG_ANTHROPIC.default_model
     converted["stream"] = True
     
     try:
