@@ -714,6 +714,235 @@ async def run_all_tests():
     print("-" * 60)
     print(f"  通过: {pass_count}/{len(results)}")
     print("=" * 60)
+    
+    # 同协议透传 + 无 model_mapping 测试
+    await test_same_protocol_passthrough_no_mapping()
+
+
+# ============================================================
+# 同协议透传 + 无 model_mapping 集成测试
+# ============================================================
+
+async def test_same_protocol_passthrough_no_mapping():
+    """测试同协议透传时 model_mapping 为空，model 原样透传"""
+    print("\n" + "=" * 60)
+    print("同协议透传 + 无 model_mapping 测试")
+    print("=" * 60)
+    
+    results = {}
+    
+    # --- Chat → Chat 后端 (无 model_mapping) ---
+    print("\n  [Chat→Chat 无model_mapping]")
+    chat_config_no_mapping = ConverterConfig(
+        backend_type="openai",
+        backend_url=CHAT_CONFIG.backend_url,
+        api_key=CHAT_CONFIG.api_key,
+        default_model=CHAT_CONFIG.default_model,
+        timeout=CHAT_CONFIG.timeout,
+        # model_mapping 不设置
+    )
+    engine_no_mapping = ProtocolConverterEngine(chat_config_no_mapping)
+    
+    # 请求中直接使用后端支持的 model 名称
+    chat_req_native = {
+        "model": "MiniMax-M2.7",
+        "messages": [{"role": "user", "content": "Say hi"}],
+    }
+    
+    # 非流式
+    ok_nonstream = False
+    try:
+        converted = engine_no_mapping.convert_request(chat_req_native)
+        assert converted["model"] == "MiniMax-M2.7", f"model_mapping为空时应原样透传, 实际: {converted['model']}"
+        print(f"    [非流式] model透传: {converted['model']} ✓")
+        
+        headers = {"Content-Type": "application/json", **chat_config_no_mapping.get_auth_headers()}
+        async with httpx.AsyncClient(timeout=chat_config_no_mapping.timeout) as client:
+            resp = await client.post(chat_config_no_mapping.backend_url, headers=headers, json=converted)
+            ok_nonstream = resp.status_code == 200
+            print(f"    [非流式] 后端响应: {resp.status_code} {'✓' if ok_nonstream else '✗'}")
+    except Exception as e:
+        print(f"    [非流式] 失败: {e}")
+    
+    # 流式
+    ok_stream = False
+    try:
+        converted = engine_no_mapping.convert_request(chat_req_native)
+        converted["stream"] = True
+        converted["stream_options"] = {"include_usage": True}
+        assert converted["model"] == "MiniMax-M2.7", f"流式model透传失败, 实际: {converted['model']}"
+        
+        headers = {"Content-Type": "application/json", **chat_config_no_mapping.get_auth_headers()}
+        async with httpx.AsyncClient(timeout=chat_config_no_mapping.timeout) as client:
+            async with client.stream("POST", chat_config_no_mapping.backend_url, headers=headers, json=converted) as resp:
+                if resp.status_code == 200:
+                    full_content = ""
+                    async for line in resp.aiter_lines():
+                        if line.startswith("data:"):
+                            data = line[5:].strip()
+                            if data == "[DONE]":
+                                break
+                            try:
+                                chunk = json.loads(data)
+                                delta = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                if delta:
+                                    full_content += delta
+                            except:
+                                pass
+                    ok_stream = True
+                    print(f"    [流式]   model透传 + 流式响应: ✓")
+                else:
+                    print(f"    [流式]   错误: {resp.status_code}")
+    except Exception as e:
+        print(f"    [流式]   失败: {e}")
+    
+    results["Chat→Chat无mapping"] = ok_nonstream and ok_stream
+    
+    # --- Responses → Responses 后端 (无 model_mapping) ---
+    print("\n  [Responses→Responses 无model_mapping]")
+    responses_config_no_mapping = ConverterConfig(
+        backend_type="openai_responses",
+        backend_url=RESPONSES_CONFIG.backend_url,
+        api_key=RESPONSES_CONFIG.api_key,
+        default_model=RESPONSES_CONFIG.default_model,
+        timeout=RESPONSES_CONFIG.timeout,
+        # model_mapping 不设置
+    )
+    engine_resp_no_mapping = ProtocolConverterEngine(responses_config_no_mapping)
+    
+    responses_req_native = {
+        "model": "openai/gpt-oss-120b:free",
+        "input": "Say hi",
+    }
+    
+    # 非流式
+    ok_nonstream = False
+    try:
+        converted = engine_resp_no_mapping.convert_request(responses_req_native)
+        assert converted["model"] == "openai/gpt-oss-120b:free", f"model_mapping为空时应原样透传, 实际: {converted['model']}"
+        print(f"    [非流式] model透传: {converted['model']} ✓")
+        
+        headers = {"Content-Type": "application/json", **responses_config_no_mapping.get_auth_headers()}
+        async with httpx.AsyncClient(timeout=responses_config_no_mapping.timeout) as client:
+            resp = await client.post(responses_config_no_mapping.backend_url, headers=headers, json=converted)
+            ok_nonstream = resp.status_code == 200
+            print(f"    [非流式] 后端响应: {resp.status_code} {'✓' if ok_nonstream else '✗'}")
+    except Exception as e:
+        print(f"    [非流式] 失败: {e}")
+    
+    # 流式
+    ok_stream = False
+    try:
+        converted = engine_resp_no_mapping.convert_request(responses_req_native)
+        converted["stream"] = True
+        assert converted["model"] == "openai/gpt-oss-120b:free"
+        
+        headers = {"Content-Type": "application/json", **responses_config_no_mapping.get_auth_headers()}
+        async with httpx.AsyncClient(timeout=responses_config_no_mapping.timeout) as client:
+            async with client.stream("POST", responses_config_no_mapping.backend_url, headers=headers, json=converted) as resp:
+                if resp.status_code == 200:
+                    full_content = ""
+                    event_types = set()
+                    async for line in resp.aiter_lines():
+                        if line.startswith("event:"):
+                            event_types.add(line[6:].strip())
+                        elif line.startswith("data:"):
+                            data = line[5:].strip()
+                            if data == "[DONE]":
+                                break
+                            try:
+                                chunk = json.loads(data)
+                                chunk_type = chunk.get("type", "")
+                                if chunk_type == "response.output_text.delta":
+                                    full_content += chunk.get("delta", "")
+                            except:
+                                pass
+                    ok_stream = True
+                    print(f"    [流式]   model透传 + 流式响应: ✓")
+                else:
+                    print(f"    [流式]   错误: {resp.status_code}")
+    except Exception as e:
+        print(f"    [流式]   失败: {e}")
+    
+    results["Responses→Responses无mapping"] = ok_nonstream and ok_stream
+    
+    # --- Anthropic → Anthropic 后端 (无 model_mapping) ---
+    print("\n  [Anthropic→Anthropic 无model_mapping]")
+    anthropic_config_no_mapping = ConverterConfig(
+        backend_type="anthropic",
+        backend_url=ANTHROPIC_CONFIG.backend_url,
+        api_key=ANTHROPIC_CONFIG.api_key,
+        default_model=ANTHROPIC_CONFIG.default_model,
+        timeout=ANTHROPIC_CONFIG.timeout,
+        # model_mapping 不设置
+    )
+    engine_anth_no_mapping = ProtocolConverterEngine(anthropic_config_no_mapping)
+    
+    anthropic_req_native = {
+        "model": "MiniMax-M2.7",
+        "max_tokens": 100,
+        "messages": [{"role": "user", "content": "Say hi"}],
+    }
+    
+    # 非流式
+    ok_nonstream = False
+    try:
+        converted = engine_anth_no_mapping.convert_request(anthropic_req_native)
+        assert converted["model"] == "MiniMax-M2.7", f"model_mapping为空时应原样透传, 实际: {converted['model']}"
+        print(f"    [非流式] model透传: {converted['model']} ✓")
+        
+        headers = {"Content-Type": "application/json", **anthropic_config_no_mapping.get_auth_headers()}
+        async with httpx.AsyncClient(timeout=anthropic_config_no_mapping.timeout) as client:
+            resp = await client.post(anthropic_config_no_mapping.backend_url, headers=headers, json=converted)
+            ok_nonstream = resp.status_code == 200
+            print(f"    [非流式] 后端响应: {resp.status_code} {'✓' if ok_nonstream else '✗'}")
+    except Exception as e:
+        print(f"    [非流式] 失败: {e}")
+    
+    # 流式
+    ok_stream = False
+    try:
+        converted = engine_anth_no_mapping.convert_request(anthropic_req_native)
+        converted["stream"] = True
+        assert converted["model"] == "MiniMax-M2.7"
+        
+        headers = {"Content-Type": "application/json", **anthropic_config_no_mapping.get_auth_headers()}
+        async with httpx.AsyncClient(timeout=anthropic_config_no_mapping.timeout) as client:
+            async with client.stream("POST", anthropic_config_no_mapping.backend_url, headers=headers, json=converted) as resp:
+                if resp.status_code == 200:
+                    full_content = ""
+                    event_types = []
+                    async for line in resp.aiter_lines():
+                        if line.startswith("event:"):
+                            event_types.append(line[6:].strip())
+                        elif line.startswith("data:"):
+                            data = line[5:].strip()
+                            if data == "[DONE]":
+                                break
+                            try:
+                                chunk = json.loads(data)
+                                if chunk.get("type") == "content_block_delta":
+                                    delta = chunk.get("delta", {})
+                                    if delta.get("type") == "text_delta":
+                                        full_content += delta.get("text", "")
+                            except:
+                                pass
+                    ok_stream = True
+                    print(f"    [流式]   model透传 + 流式响应: ✓")
+                else:
+                    print(f"    [流式]   错误: {resp.status_code}")
+    except Exception as e:
+        print(f"    [流式]   失败: {e}")
+    
+    results["Anthropic→Anthropic无mapping"] = ok_nonstream and ok_stream
+    
+    # 汇总
+    print("\n" + "-" * 60)
+    print("同协议透传 + 无 model_mapping 测试结果:")
+    for name, ok in results.items():
+        status = "✓ 通过" if ok else "✗ 失败"
+        print(f"  {name}: {status}")
+    print("-" * 60)
 
 
 if __name__ == "__main__":
