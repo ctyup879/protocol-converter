@@ -547,6 +547,23 @@ python3 examples/integration_test_all_9_paths.py
 
 ## 更新日志
 
+### v1.23.0
+
+基于官方文档、Context7 实时检索和 Python SDK（`openai-python` v2.11、`anthropic-sdk-python`）进行6轮深度审查后修复关键缺陷：
+
+**协议解析与字段映射修复：**
+
+- **`tool_choice` dict `"none"` 类型处理修复**：Anthropic `tool_choice={"type":"none"}` 格式之前未被处理，正确添加 `type=="none"` → `return "none"` 映射（之前仅处理 "auto"/"any"/"tool" 三种类型，遗漏 "none"）
+
+**数据类型转换修复：**
+
+- **工具输入 JSON 双重序列化修复**：Anthropic→Chat 转换中，tool_use 块的 `input` 字段若已是 JSON 字符串（往返转换场景），`json.dumps()` 会将其双重序列化为 `"\\\"...\\\""` 格式导致解析失败。现添加类型检查：input 为字符串时直接使用，为 None 时输出 `"{}"`，为 dict 时才序列化
+
+**测试覆盖：**
+
+- 全部 347 个单元测试通过
+- 3×3 全量 9 路集成测试全部通过
+
 ### v1.22.0
 
 基于官方文档、Context7 实时检索和 Python SDK（`openai-python` v2.11、`anthropic-sdk-python`）进行6轮深度审查后修复防御性改进：

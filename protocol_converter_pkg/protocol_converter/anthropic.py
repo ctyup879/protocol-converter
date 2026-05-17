@@ -402,12 +402,20 @@ class AnthropicConverter:
                 
                 elif block_type == "tool_use":
                     # assistant 消息中的工具调用
+                    tool_input = block.get("input", {})
+                    if isinstance(tool_input, str):
+                        # Already serialized - use as-is to avoid double-serialization
+                        arguments_str = tool_input
+                    elif tool_input is None:
+                        arguments_str = "{}"
+                    else:
+                        arguments_str = json.dumps(tool_input, ensure_ascii=False)
                     tool_calls.append({
                         "id": block.get("id", f"toolu_{uuid.uuid4().hex[:24]}"),
                         "type": "function",
                         "function": {
                             "name": block.get("name", ""),
-                            "arguments": json.dumps(block.get("input", {}), ensure_ascii=False)
+                            "arguments": arguments_str
                         }
                     })
                 
@@ -475,12 +483,20 @@ class AnthropicConverter:
                 
                 elif block_type == "server_tool_use":
                     # 服务器工具调用 - 转为普通工具调用
+                    tool_input = block.get("input", {})
+                    if isinstance(tool_input, str):
+                        # Already serialized - use as-is to avoid double-serialization
+                        arguments_str = tool_input
+                    elif tool_input is None:
+                        arguments_str = "{}"
+                    else:
+                        arguments_str = json.dumps(tool_input, ensure_ascii=False)
                     tool_calls.append({
                         "id": block.get("id", f"toolu_{uuid.uuid4().hex[:24]}"),
                         "type": "function",
                         "function": {
                             "name": block.get("name", ""),
-                            "arguments": json.dumps(block.get("input", {}), ensure_ascii=False)
+                            "arguments": arguments_str
                         }
                     })
                 
@@ -696,7 +712,9 @@ class AnthropicConverter:
                 return "auto", parallel_tool_calls
             if tool_choice.get("type") == "any":
                 return "required", parallel_tool_calls
-        
+            if tool_choice.get("type") == "none":
+                return "none", parallel_tool_calls
+
         return None, None
     
     # ================================================================
