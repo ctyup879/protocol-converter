@@ -537,16 +537,6 @@ python3 examples/integration_test_all_9_paths.py
 | Responses 后端集成测试 | `examples/integration_test_responses_backend.py` | 7 | 全部通过 |
 | 3×3 全量集成测试 | `examples/integration_test_all_9_paths.py` | 9 | 全部通过 |
 
-**核心依赖说明：**
-
-| 依赖 | 版本要求 | 用途 | 是否必需 |
-|------|---------|------|---------|
-| Python | ≥ 3.9 | 运行时 | 必需 |
-| httpx | ≥ 0.25.0 | HTTP 客户端（用于转发请求） | 可选 |
-| pytest | ≥ 7.0.0 | 单元测试框架 | 开发必需 |
-| pytest-asyncio | ≥ 0.21.0 | 异步测试支持 | 开发必需 |
-| pytest-cov | ≥ 4.0.0 | 测试覆盖率 | 开发可选 |
-
 ## 参考
 
 - [OpenAI Chat Completions API](https://platform.openai.com/docs/api-reference/chat)
@@ -909,6 +899,19 @@ python3 examples/integration_test_all_9_paths.py
 - **协议检测器补全**：`OPENAI_RESPONSES_INPUT_TYPES` 增加 `local_shell_call_output`、`mcp_approval_response`
 - **流式 Anthropic 后端 SSE 解析改进**：正确解析 `event:` 行，缓存事件类型
 - **103 个单元测试**（新增 16 个覆盖上述改进）
+
+### v1.0.0
+
+初始版本，协议转换器核心功能：
+
+- **三种协议支持**：OpenAI Chat Completions、OpenAI Responses、Anthropic Messages
+- **9 路转换矩阵**：3×3 协议×后端组合全覆盖
+- **请求转换**：任意协议 → 任意协议
+- **响应转换**：后端响应 → 客户端协议格式
+- **流式支持**：完整的 SSE 流式转换
+- **工具调用**：function calling / tool_use / tool_result 跨协议转换
+- **多模态**：图片、文档、文件输入转换
+- **协议检测**：自动识别请求协议类型
 
 ### v1.1.0
 
