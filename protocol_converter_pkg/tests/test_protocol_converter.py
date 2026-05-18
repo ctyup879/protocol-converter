@@ -5604,7 +5604,7 @@ class TestResponsesCompletedAtField:
         assert "completed_at" in result
 
     def test_incomplete_no_completed_at(self):
-        """incomplete 状态的响应不应包含 completed_at"""
+        """incomplete 状态的响应也应包含 completed_at（Responses API 规范：所有终态都有 completed_at）"""
         chat_response = {
             "id": "chatcmpl-123",
             "model": "gpt-4o",
@@ -5616,7 +5616,7 @@ class TestResponsesCompletedAtField:
         }
         result = OpenAIResponsesConverter.from_openai_chat(chat_response)
         assert result["status"] == "incomplete"
-        assert "completed_at" not in result
+        assert "completed_at" in result
 
 
 class TestResponsesAssistantMultimodalContent:

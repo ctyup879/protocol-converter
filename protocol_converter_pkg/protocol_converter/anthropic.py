@@ -230,7 +230,7 @@ class AnthropicConverter:
         if request.get("stop_sequences"):
             chat_request["stop"] = request["stop_sequences"]
         metadata = request.get("metadata")
-        if metadata and isinstance(metadata, dict):
+        if metadata is not None and isinstance(metadata, dict):
             user_id = metadata.get("user_id")
             if user_id:
                 chat_request["user"] = user_id
@@ -239,7 +239,7 @@ class AnthropicConverter:
             if mapped:
                 chat_request["service_tier"] = mapped
         
-        # 6.5 处理 output_format 参数 (Anthropic 结构化输出 → Chat response_format)
+        # 6.1 处理 output_format 参数 (Anthropic 结构化输出 → Chat response_format)
         # Anthropic: output_format: Pydantic 模型类 或 {"type": "json_schema", ...}
         # Chat: response_format: {"type": "json_schema", "json_schema": {"name": "...", "schema": {...}}}
         output_format = request.get("output_format")
@@ -261,8 +261,7 @@ class AnthropicConverter:
                     }
             elif fmt_type == "json_object":
                 chat_request["response_format"] = {"type": "json_object"}
-            elif fmt_type == "text":
-                chat_request["response_format"] = {"type": "text"}
+            # 注: Anthropic output_format 不支持 type="text"，不再映射
         
         # 6.6 处理 output_config.format 参数 (Ref: Anthropic SDK OutputConfigParam.format)
         # output_config.format: {"type": "json_schema", "schema": {...}}
@@ -360,8 +359,9 @@ class AnthropicConverter:
         if request.get("inference_geo") is not None:
             extra["inference_geo"] = request["inference_geo"]
         if request.get("metadata") is not None:
-            # 保留完整 metadata (不仅仅是 user_id)
             extra["metadata"] = request["metadata"]
+        if request.get("service_tier") is not None:
+            extra["original_service_tier"] = request["service_tier"]
         # 保留 Anthropic 服务器工具
         if server_tools:
             extra["anthropic_server_tools"] = server_tools
@@ -529,8 +529,8 @@ class AnthropicConverter:
                     if isinstance(search_text, str):
                         text_parts.append(f"[Search Result: {search_text}]")
                         content_parts.append({"type": "text", "text": f"[Search Result: {search_text}]"})
-                    elif isinstance(search_content := search_text, list):
-                        for item in search_content:
+                    elif isinstance(search_text, list):
+                        for item in search_text:
                             if isinstance(item, dict) and item.get("type") == "text":
                                 sr_text = f"[Search Result: {item.get('text', '')}]"
                                 text_parts.append(sr_text)
@@ -885,31 +885,39 @@ class AnthropicConverter:
         
         # 从 prompt_tokens_details 提取缓存信息
         prompt_tokens_details = usage.get("prompt_tokens_details")
+        completion_tokens_details = usage.get("completion_tokens_details")
         if isinstance(prompt_tokens_details, dict):
             cached_tokens = prompt_tokens_details.get("cached_tokens", 0)
             if cached_tokens:
                 anthropic_usage["cache_read_input_tokens"] = cached_tokens
             # 提取 audio_tokens（Chat API 特有）
-            audio_tokens = prompt_tokens_details.get("audio_tokens", 0)
-            if audio_tokens:
-                anthropic_usage["audio_tokens"] = audio_tokens
+            # Chat API 分 input/output audio_tokens，合并为 Anthropic 的单一 audio_tokens
+            audio_tokens_input = prompt_tokens_details.get("audio_tokens", 0)
+            audio_tokens_output = 0
+            if isinstance(completion_tokens_details, dict):
+                audio_tokens_output = completion_tokens_details.get("audio_tokens", 0)
+            total_audio_tokens = audio_tokens_input + audio_tokens_output
+            if total_audio_tokens:
+                anthropic_usage["audio_tokens"] = total_audio_tokens
         
         # 从 completion_tokens_details 提取推理 token 信息
-        completion_tokens_details = usage.get("completion_tokens_details")
         if isinstance(completion_tokens_details, dict):
             reasoning_tokens = completion_tokens_details.get("reasoning_tokens", 0)
             if reasoning_tokens:
                 anthropic_usage["output_tokens"] = usage.get("completion_tokens", 0)
-            # 提取 audio_tokens 输出
-            audio_tokens_output = completion_tokens_details.get("audio_tokens", 0)
-            if audio_tokens_output:
-                anthropic_usage["audio_tokens"] = audio_tokens_output
         
         # 从 Chat usage 额外字段中恢复 Anthropic 特有的 usage 数据（用于往返转换场景）
         if usage.get("cache_creation_input_tokens"):
             anthropic_usage["cache_creation_input_tokens"] = usage["cache_creation_input_tokens"]
         if usage.get("cache_read_input_tokens"):
             anthropic_usage["cache_read_input_tokens"] = usage["cache_read_input_tokens"]
+        # 恢复 server_tool_use 和 cache_creation（Anthropic 特有，Chat API 无等价字段）
+        if usage.get("server_tool_use"):
+            anthropic_usage["server_tool_use"] = usage["server_tool_use"]
+        if usage.get("cache_creation"):
+            anthropic_usage["cache_creation"] = usage["cache_creation"]
+        if usage.get("inference_geo"):
+            anthropic_usage["inference_geo"] = usage["inference_geo"]
         
         # Chat service_tier -> Anthropic usage.service_tier
         # Chat: "auto"|"default"|"flex"|"scale"|"priority"
@@ -1078,7 +1086,9 @@ class AnthropicConverter:
             return events
         
         # 3. 处理文本内容
-        if delta.get("content") is not None and delta["content"] != "":
+        # 注意: 移除 delta["content"] != "" 条件，因为兼容后端可能发送 content="" 作为首个 delta
+        # 此时仍需发送 content_block_start 事件以维持正确的 Anthropic 事件序列
+        if delta.get("content") is not None:
             if state["thinking_block_started"]:
                 state["thinking_block_started"] = False
                 events.append({
@@ -1164,15 +1174,6 @@ class AnthropicConverter:
         
         # 5. 消息结束
         if finish_reason:
-            if finish_reason == "content_filter":
-                events.append({
-                    "type": "error",
-                    "error": {
-                        "type": "overloaded_error",
-                        "message": "Content filtered by safety system"
-                    }
-                })
-            
             if state["thinking_block_started"]:
                 state["thinking_block_started"] = False
                 events.append({
@@ -1216,6 +1217,16 @@ class AnthropicConverter:
             events.append({
                 "type": "message_stop"
             })
+            
+            # content_filter 时在 message_stop 后追加 error 事件（Anthropic 规范：error 在消息序列之后）
+            if finish_reason == "content_filter":
+                events.append({
+                    "type": "error",
+                    "error": {
+                        "type": "overloaded_error",
+                        "message": "Content filtered by safety system"
+                    }
+                })
             
             return events
         
@@ -1309,7 +1320,7 @@ class AnthropicConverter:
             return events
         
         # 3. 处理文本内容
-        if delta.get("content") is not None and delta["content"] != "":
+        if delta.get("content") is not None:
             # 如果 thinking 块已开始但未关闭，先关闭它
             if cls._stream_state["thinking_block_started"]:
                 cls._stream_state["thinking_block_started"] = False
@@ -1402,16 +1413,6 @@ class AnthropicConverter:
         
         # 5. 消息结束
         if finish_reason:
-            # 处理 content_filter 错误 -> error 事件
-            if finish_reason == "content_filter":
-                events.append({
-                    "type": "error",
-                    "error": {
-                        "type": "overloaded_error",
-                        "message": "Content filtered by safety system"
-                    }
-                })
-            
             # 关闭所有未关闭的 content blocks
             if cls._stream_state["thinking_block_started"]:
                 cls._stream_state["thinking_block_started"] = False
@@ -1459,6 +1460,16 @@ class AnthropicConverter:
             events.append({
                 "type": "message_stop"
             })
+            
+            # content_filter 时在 message_stop 后追加 error 事件（Anthropic 规范：error 在消息序列之后）
+            if finish_reason == "content_filter":
+                events.append({
+                    "type": "error",
+                    "error": {
+                        "type": "overloaded_error",
+                        "message": "Content filtered by safety system"
+                    }
+                })
             
             return events
         

@@ -18,6 +18,8 @@
 
 import asyncio
 import json
+import os
+from pathlib import Path
 from protocol_converter import (
     ProtocolConverterEngine,
     ConverterConfig,
@@ -26,6 +28,18 @@ from protocol_converter import (
     OpenAIChatConverter,
     AnthropicConverter,
 )
+
+
+def _load_env():
+    env_path = Path(__file__).resolve().parent.parent / ".env"
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, _, value = line.partition("=")
+                os.environ.setdefault(key.strip(), value.strip())
+
+_load_env()
 
 
 # ============================================================
@@ -39,7 +53,7 @@ from protocol_converter import (
 RESPONSES_CONFIG = ConverterConfig(
     backend_type="openai_responses",
     backend_url="https://openrouter.ai/api/v1/responses",
-    api_key="REDACTED_OPENROUTER_API_KEY",
+    api_key=os.environ.get("OPENROUTER_API_KEY", ""),
     default_model="openai/gpt-oss-120b:free",
     timeout=60.0,
     model_mapping={

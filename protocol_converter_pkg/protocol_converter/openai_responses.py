@@ -1378,6 +1378,9 @@ class OpenAIResponsesConverter:
         if request.get("service_tier"):
             tier_map = {"default": "standard_only", "auto": "auto", "flex": "standard_only", "scale": "standard_only", "priority": "standard_only"}
             anthropic_request["service_tier"] = tier_map.get(request["service_tier"], request["service_tier"])
+            if "extra_body" not in anthropic_request:
+                anthropic_request["extra_body"] = {}
+            anthropic_request["extra_body"]["original_service_tier"] = request["service_tier"]
         
         # 10. Responses 特有参数（Anthropic 不支持的，放入 extra_body）
         extra = {}
@@ -1930,16 +1933,18 @@ class OpenAIResponsesConverter:
             "incomplete_details": incomplete_details,  # Responses API: 始终存在，null 表示完成
             "error": None,
             "metadata": response.get("metadata"),
-            "parallel_tool_calls": True,  # Chat API 默认允许并行工具调用
+            "parallel_tool_calls": response.get("parallel_tool_calls", True),
         }
         
-        # 仅在 status 为 completed 时设置 completed_at
-        if status == "completed":
+        # 在任何终态时设置 completed_at
+        if status in ("completed", "failed", "incomplete"):
             result["completed_at"] = int(time.time())
         
         # 添加可选字段（如果 Chat 响应中存在）
         if response.get("service_tier"):
             result["service_tier"] = response["service_tier"]
+        elif usage.get("service_tier"):
+            result["service_tier"] = usage["service_tier"]
         if response.get("system_fingerprint"):
             result["system_fingerprint"] = response["system_fingerprint"]
         # 温度和 top_p 如果原始请求中有
@@ -1969,6 +1974,7 @@ class OpenAIResponsesConverter:
         message_content = None
         message_annotations = None
         message_refusal = None
+        message_phase = None
         tool_calls = []
         reasoning_content = None
         
@@ -1996,6 +2002,9 @@ class OpenAIResponsesConverter:
                     message_content = "\n".join(texts)
                 if all_annotations:
                     message_annotations = all_annotations
+                # 保留 phase 字段（OpenAI SDK ResponseOutputMessage.phase）
+                if item.get("phase"):
+                    message_phase = item["phase"]
             
             elif item_type == "reasoning":
                 # reasoning 输出项 -> reasoning_content (OpenAI o系列格式)
@@ -2027,14 +2036,18 @@ class OpenAIResponsesConverter:
                     reasoning_content = f"[redacted_thinking: {item['encrypted_content']}]"
             
             elif item_type == "function_call":
-                tool_calls.append({
+                tc = {
                     "id": item.get("call_id", item.get("id", "")),
                     "type": "function",
                     "function": {
                         "name": item.get("name", ""),
                         "arguments": item.get("arguments", "{}")
                     }
-                })
+                }
+                # 保留 namespace 字段（OpenAI SDK ResponseFunctionToolCall.namespace）
+                if item.get("namespace"):
+                    tc["namespace"] = item["namespace"]
+                tool_calls.append(tc)
             
             # 以下输出项类型在 Chat API 中无直接等价，忽略或部分转换
             
@@ -2055,8 +2068,14 @@ class OpenAIResponsesConverter:
                 pass
             
             elif item_type == "image_generation_call":
-                # 图片生成调用 - Chat API 无等价项，跳过
-                pass
+                # 图片生成调用 - Chat API 无等价项，降级为占位文本
+                result_str = item.get("result", "")
+                if result_str:
+                    message_content = (message_content or "") + f"\n[Image generated: base64 data length={len(result_str)}]"
+                elif item.get("status") == "in_progress":
+                    pass
+                else:
+                    pass
             
             elif item_type == "local_shell_call":
                 # 本地终端调用 - Chat API 无等价项，跳过
@@ -2178,6 +2197,9 @@ class OpenAIResponsesConverter:
         # 保留 annotations（Responses output_text.annotations -> Chat message.annotations）
         if message_annotations is not None:
             message["annotations"] = message_annotations
+        # 保留 phase 字段（Responses message.phase -> Chat extra_body）
+        if message_phase is not None:
+            message["phase"] = message_phase
         
         result = {
             "id": response.get("id", f"chatcmpl-{uuid.uuid4().hex[:24]}"),
@@ -2413,6 +2435,9 @@ class OpenAIResponsesConverter:
         "output_index": 0,
         "reasoning_item_started": False,
         "reasoning_summary_started": False,
+        "reasoning_text_buffer": "",
+        "output_text_buffer": "",
+        "function_args_buffers": {},
     }
     
     @classmethod
@@ -2425,6 +2450,9 @@ class OpenAIResponsesConverter:
             "output_index": 0,
             "reasoning_item_started": False,
             "reasoning_summary_started": False,
+            "reasoning_text_buffer": "",
+            "output_text_buffer": "",
+            "function_args_buffers": {},
         }
     
     @classmethod
@@ -2528,18 +2556,21 @@ class OpenAIResponsesConverter:
                 "output_index": output_idx,
                 "delta": reasoning_content
             })
+            cls._stream_state["reasoning_text_buffer"] += reasoning_content
             return events
         
         # 2. 文本内容
-        if content:
+        # 使用 is not None 判断以支持空字符串 content（某些后端可能发 content="" 作为首个delta）
+        if delta.get("content") is not None:
             output_idx = cls._stream_state["output_index"]
             
             # 如果 reasoning 项已开始但未关闭，先关闭它
             if cls._stream_state["reasoning_item_started"]:
+                reasoning_text = cls._stream_state["reasoning_text_buffer"]
                 events.append({
                     "type": "response.reasoning_text.done",
                     "output_index": output_idx,
-                    "text": ""
+                    "text": reasoning_text
                 })
                 events.append({
                     "type": "response.output_item.done",
@@ -2548,7 +2579,8 @@ class OpenAIResponsesConverter:
                         "type": "reasoning",
                         "id": f"rs_{uuid.uuid4().hex[:24]}",
                         "status": "completed",
-                        "content": []
+                        "summary": [],
+                        "content": [{"type": "reasoning_text", "text": reasoning_text}] if reasoning_text else []
                     }
                 })
                 cls._stream_state["reasoning_item_started"] = False
@@ -2581,13 +2613,15 @@ class OpenAIResponsesConverter:
                 })
                 cls._stream_state["content_part_started"] = True
             
-            # 文本增量
-            events.append({
-                "type": "response.output_text.delta",
-                "output_index": output_idx,
-                "content_index": 0,
-                "delta": content
-            })
+            # 文本增量（仅非空时发送 delta 事件，空字符串仅用于初始化消息项）
+            if content:
+                events.append({
+                    "type": "response.output_text.delta",
+                    "output_index": output_idx,
+                    "content_index": 0,
+                    "delta": content
+                })
+                cls._stream_state["output_text_buffer"] += content
             return events
         
         # 3. 工具调用
@@ -2602,10 +2636,11 @@ class OpenAIResponsesConverter:
                 if tc_id and tc_id not in cls._stream_state["started_function_ids"]:
                     # 关闭之前的 reasoning 项（如果有）
                     if cls._stream_state["reasoning_item_started"]:
+                        reasoning_text = cls._stream_state["reasoning_text_buffer"]
                         events.append({
                             "type": "response.reasoning_text.done",
                             "output_index": cls._stream_state["output_index"],
-                            "text": ""
+                            "text": reasoning_text
                         })
                         events.append({
                             "type": "response.output_item.done",
@@ -2614,7 +2649,8 @@ class OpenAIResponsesConverter:
                                 "type": "reasoning",
                                 "id": f"rs_{uuid.uuid4().hex[:24]}",
                                 "status": "completed",
-                                "content": []
+                                "summary": [],
+                                "content": [{"type": "reasoning_text", "text": reasoning_text}] if reasoning_text else []
                             }
                         })
                         cls._stream_state["reasoning_item_started"] = False
@@ -2622,12 +2658,13 @@ class OpenAIResponsesConverter:
                     
                     # 关闭之前的消息项（如果有）
                     if cls._stream_state["message_item_started"]:
+                        output_text = cls._stream_state["output_text_buffer"]
                         if cls._stream_state["content_part_started"]:
                             events.append({
                                 "type": "response.output_text.done",
                                 "output_index": cls._stream_state["output_index"],
                                 "content_index": 0,
-                                "text": ""
+                                "text": output_text
                             })
                             events.append({
                                 "type": "response.content_part.done",
@@ -2635,7 +2672,7 @@ class OpenAIResponsesConverter:
                                 "content_index": 0,
                                 "part": {
                                     "type": "output_text",
-                                    "text": "",
+                                    "text": output_text,
                                     "annotations": []
                                 }
                             })
@@ -2648,7 +2685,7 @@ class OpenAIResponsesConverter:
                                 "id": f"msg_{uuid.uuid4().hex[:24]}",
                                 "status": "completed",
                                 "role": "assistant",
-                                "content": [{"type": "output_text", "text": "", "annotations": []}]
+                                "content": [{"type": "output_text", "text": output_text, "annotations": []}]
                             }
                         })
                         cls._stream_state["message_item_started"] = False
@@ -2681,6 +2718,8 @@ class OpenAIResponsesConverter:
                         "output_index": func_output_idx,
                         "delta": args_part
                     })
+                    cls._stream_state["function_args_buffers"][tc_id] = \
+                        cls._stream_state["function_args_buffers"].get(tc_id, "") + args_part
             
             return events
         
@@ -2691,10 +2730,11 @@ class OpenAIResponsesConverter:
             # 关闭 reasoning 项
             if cls._stream_state["reasoning_item_started"]:
                 # 先发 response.reasoning_text.done 事件
+                reasoning_text = cls._stream_state["reasoning_text_buffer"]
                 events.append({
                     "type": "response.reasoning_text.done",
                     "output_index": output_idx,
-                    "text": ""  # 完整文本在流式场景中无法精确获取
+                    "text": reasoning_text
                 })
                 events.append({
                     "type": "response.output_item.done",
@@ -2703,7 +2743,8 @@ class OpenAIResponsesConverter:
                         "type": "reasoning",
                         "id": f"rs_{uuid.uuid4().hex[:24]}",
                         "status": "completed",
-                        "content": []
+                        "summary": [],
+                        "content": [{"type": "reasoning_text", "text": reasoning_text}] if reasoning_text else []
                     }
                 })
                 cls._stream_state["reasoning_item_started"] = False
@@ -2712,12 +2753,13 @@ class OpenAIResponsesConverter:
             
             # 关闭消息项
             if cls._stream_state["message_item_started"]:
+                output_text = cls._stream_state["output_text_buffer"]
                 if cls._stream_state["content_part_started"]:
                     events.append({
                         "type": "response.output_text.done",
                         "output_index": output_idx,
                         "content_index": 0,
-                        "text": ""
+                        "text": output_text
                     })
                     events.append({
                         "type": "response.content_part.done",
@@ -2725,7 +2767,7 @@ class OpenAIResponsesConverter:
                         "content_index": 0,
                         "part": {
                             "type": "output_text",
-                            "text": "",
+                            "text": output_text,
                             "annotations": []
                         }
                     })
@@ -2737,17 +2779,18 @@ class OpenAIResponsesConverter:
                         "id": f"msg_{uuid.uuid4().hex[:24]}",
                         "status": "completed",
                         "role": "assistant",
-                        "content": [{"type": "output_text", "text": "", "annotations": []}]
+                        "content": [{"type": "output_text", "text": output_text, "annotations": []}]
                     }
                 })
             
             # 关闭 function_call 项
             for tc_id in cls._stream_state["started_function_ids"]:
                 func_output_idx = cls._stream_state.get(f"_func_idx_{tc_id}", 1)
+                func_args = cls._stream_state["function_args_buffers"].get(tc_id, "")
                 events.append({
                     "type": "response.function_call_arguments.done",
                     "output_index": func_output_idx,
-                    "arguments": ""
+                    "arguments": func_args
                 })
                 events.append({
                     "type": "response.output_item.done",
@@ -2756,7 +2799,8 @@ class OpenAIResponsesConverter:
                         "type": "function_call",
                         "id": tc_id,
                         "call_id": tc_id,
-                        "status": "completed"
+                        "status": "completed",
+                        "arguments": func_args
                     }
                 })
             

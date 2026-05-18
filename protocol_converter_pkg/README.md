@@ -506,13 +506,27 @@ python3 -m pytest tests/test_protocol_converter.py -v -k "TestAnthropicThinkingW
 
 ### 执行集成测试
 
-集成测试需要配置有效的 API Key（位于 `examples/` 下的各测试文件中），支持以下后端：
+集成测试需要配置有效的 API Key，现已支持从 `.env` 文件读取：
+
+**环境配置（`.env` 文件）：**
+
+在 `protocol_converter_pkg/` 目录下创建 `.env` 文件：
+
+```bash
+# MiniMax API (Chat & Anthropic 兼容后端)
+MINIMAX_API_KEY=sk-cp-xxx...
+
+# OpenRouter API (Responses 后端)
+OPENROUTER_API_KEY=sk-or-v1-xxx...
+```
+
+**运行集成测试：**
 
 ```bash
 # 1. 进入项目目录
 cd /root/repos/ai-proxy/protocol_converter_pkg
 
-# 2. OpenAI Chat 后端集成测试（MiniMax API，8 项测试）
+# 2. OpenAI Chat 后端集成测试（MiniMax API，10 项测试）
 python3 examples/integration_test_chat_backend.py
 
 # 3. Anthropic 兼容后端集成测试（MiniMax API，9 项测试，含流式）
@@ -549,6 +563,7 @@ python3 examples/integration_test_all_9_paths.py
 
 | 版本 | 日期 | 说明 |
 |------|------|------|
+| **v1.32.0** | 2026-05-18 | 集成测试 API Key 改用 `.env` 文件读取，新增 10 项深度审查修复（service_tier 往返、空 delta 事件、audio_tokens 合并、done 事件缓冲等） |
 | **v1.26.0** | 2026-05-17 | 集成测试流式覆盖补全：4 个集成测试文件均补齐跨协议流式测试，9 路全量测试支持非流式+流式双模式 |
 | **v1.25.0** | 2026-05-17 | 7 项深度审查修复：instructions 顺序修正、redacted_thinking 往返转换完善、reasoning_content→Responses encrypted_content 映射、thinking.display→reasoning.summary 映射、user→metadata.user_id 映射、流式完成事件转换 |
 | v1.24.0 | — | 6 轮深度审查修复：`minimal` 推理映射修正、`redacted_thinking` 往返转换、空 input 容错、`stop` 空值过滤、工具 `input_schema` 默认值 |
@@ -556,7 +571,7 @@ python3 examples/integration_test_all_9_paths.py
 | v1.17.0 | — | 3 轮审查修复：`text.verbosity` 双向映射、`generate_summary` 往返、`cache_control` 保留等 |
 | v1.0.0 | — | 初始版本：9 路转换矩阵、流式 SSE、工具调用、多模态支持 |
 
-**当前版本**：`1.29.0`（同步更新于 `pyproject.toml` 和 `protocol_converter/__init__.py`）
+**当前版本**：`1.32.0`（同步更新于 `pyproject.toml` 和 `protocol_converter/__init__.py`）
 
 **核心依赖**：
 - Python ≥ 3.9
@@ -580,6 +595,35 @@ PYTHONPATH=. python3 examples/integration_test_responses_backend.py
 ```
 
 ## 更新日志
+
+### v1.32.0
+
+**环境配置改进：**
+
+- 集成测试 API Key 改用 `.env` 文件读取，不再硬编码在源码中
+- 新增 `.env` 文件支持（包含 `MINIMAX_API_KEY` 和 `OPENROUTER_API_KEY`）
+- `.env` 已加入 `.gitignore`，避免敏感信息泄露
+
+**深度审查修复（基于官方文档/SDK对比）：**
+
+| 问题级别 | 修复项 | 说明 |
+|---------|--------|------|
+| HIGH | service_tier 往返转换丢失 | 在 extra_body 中保留 `original_service_tier`，反向转换时恢复 |
+| HIGH | 流式空 content delta 事件断裂 | 移除 `delta["content"] != ""` 条件，支持空字符串作为首个 delta |
+| HIGH | audio_tokens 覆盖问题 | 合并 input/output audio_tokens 而非覆盖 |
+| HIGH | output_format.type=text 无效映射 | 移除该分支（Anthropic 不支持 text 类型） |
+| HIGH | content_filter 流式事件序列错误 | 将 error 事件移到 message_stop 之后 |
+| MEDIUM | Responses done 事件内容始终为空 | 添加缓冲区累积 delta 文本 |
+| MEDIUM | Chat→Anthropic usage 字段遗漏 | 恢复 server_tool_use/cache_creation/inference_geo |
+| MEDIUM | Responses namespace/phase 字段未处理 | 新增这两个字段的处理 |
+| MEDIUM | reasoning 项缺少 summary 字段 | 所有 reasoning output_item.done 添加 `"summary": []` |
+| MEDIUM | stop 序列包含 None 值 | 添加 `[s for s in stop_val if s is not None]` 过滤 |
+
+**测试验证：**
+
+- 394 个单元测试全部通过
+- 9 路全量集成测试全部通过
+- Chat/Anthropic/Responses 后端集成测试全部通过
 
 ### v1.31.0
 

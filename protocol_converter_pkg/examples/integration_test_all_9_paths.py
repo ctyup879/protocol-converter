@@ -12,6 +12,8 @@ Anthropic 请求:       ⑦            ⑧               ⑨
 
 import asyncio
 import json
+import os
+from pathlib import Path
 import httpx
 from protocol_converter import (
     ProtocolConverterEngine,
@@ -22,6 +24,18 @@ from protocol_converter import (
 )
 
 
+def _load_env():
+    env_path = Path(__file__).resolve().parent.parent / ".env"
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, _, value = line.partition("=")
+                os.environ.setdefault(key.strip(), value.strip())
+
+_load_env()
+
+
 # ============================================================
 # 三种后端配置
 # ============================================================
@@ -30,7 +44,7 @@ from protocol_converter import (
 CHAT_CONFIG = ConverterConfig(
     backend_type="openai",
     backend_url="https://api.minimaxi.com/v1/chat/completions",
-    api_key="REDACTED_MINIMAX_API_KEY",
+    api_key=os.environ.get("MINIMAX_API_KEY", ""),
     default_model="MiniMax-M2.7",
     timeout=60.0,
     model_mapping={
@@ -44,7 +58,7 @@ CHAT_CONFIG = ConverterConfig(
 RESPONSES_CONFIG = ConverterConfig(
     backend_type="openai_responses",
     backend_url="https://openrouter.ai/api/v1/responses",
-    api_key="REDACTED_OPENROUTER_API_KEY",
+    api_key=os.environ.get("OPENROUTER_API_KEY", ""),
     default_model="openai/gpt-oss-120b:free",
     timeout=60.0,
     model_mapping={
@@ -58,7 +72,7 @@ RESPONSES_CONFIG = ConverterConfig(
 ANTHROPIC_CONFIG = ConverterConfig(
     backend_type="anthropic",
     backend_url="https://api.minimaxi.com/anthropic/v1/messages",
-    api_key="REDACTED_MINIMAX_API_KEY",
+    api_key=os.environ.get("MINIMAX_API_KEY", ""),
     default_model="MiniMax-M2.7",
     timeout=60.0,
     model_mapping={

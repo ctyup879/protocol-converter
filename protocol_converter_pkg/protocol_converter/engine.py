@@ -427,7 +427,7 @@ class ProtocolConverterEngine:
             
             if role == "assistant":
                 assistant_content = []
-                if content:
+                if content is not None:
                     if isinstance(content, str):
                         assistant_content.append({"type": "text", "text": content})
                     elif isinstance(content, list):
@@ -642,7 +642,9 @@ class ProtocolConverterEngine:
         if request.get("stop") is not None:
             stop_val = request["stop"]
             if isinstance(stop_val, list) and stop_val:
-                anthropic_request["stop_sequences"] = stop_val
+                valid_stops = [s for s in stop_val if s is not None and s != ""]
+                if valid_stops:
+                    anthropic_request["stop_sequences"] = valid_stops
             elif isinstance(stop_val, str) and stop_val:
                 anthropic_request["stop_sequences"] = [stop_val]
         
@@ -767,6 +769,11 @@ class ProtocolConverterEngine:
                 "priority": "standard_only",
             }
             anthropic_request["service_tier"] = tier_map.get(service_tier, service_tier)
+        # 从 extra_body 中恢复原始 Anthropic service_tier（解决往返转换信息丢失）
+        if isinstance(request.get("extra_body"), dict):
+            original_st = request["extra_body"].get("original_service_tier")
+            if original_st and original_st in ("auto", "standard_only"):
+                anthropic_request["service_tier"] = original_st
         
         # inference_geo (Anthropic 特有)
         inference_geo = request.get("inference_geo") or self.config.inference_geo
@@ -880,6 +887,10 @@ class ProtocolConverterEngine:
                 # adaptive 类型标记
                 if thinking_type == "adaptive":
                     reasoning_config["effort"] = "medium"  # adaptive 无确切 effort，默认 medium
+                # 保留 from_openai_chat_request 生成的 generate_summary 等字段
+                existing_reasoning = result.get("reasoning", {})
+                if isinstance(existing_reasoning, dict) and existing_reasoning.get("generate_summary") is not None:
+                    reasoning_config["generate_summary"] = existing_reasoning["generate_summary"]
                 result["reasoning"] = reasoning_config
             elif thinking_type == "disabled":
                 result["reasoning"] = {"effort": "none"}
@@ -1031,24 +1042,29 @@ class ProtocolConverterEngine:
                     # 标记为脱敏思考内容，后续转换时可恢复
                     reasoning_content = f"[redacted_thinking: {data}]"
             elif block.get("type") == "tool_use":
-                tool_calls.append({
+                tc = {
                     "id": block.get("id", f"call_{uuid.uuid4().hex[:24]}"),
                     "type": "function",
                     "function": {
                         "name": block.get("name", ""),
                         "arguments": json.dumps(block.get("input", {}), ensure_ascii=False)
                     }
-                })
+                }
+                if block.get("caller"):
+                    tc["caller"] = block["caller"]
+                tool_calls.append(tc)
             elif block.get("type") == "server_tool_use":
-                # 服务器工具调用 - 转为普通工具调用
-                tool_calls.append({
+                tc = {
                     "id": block.get("id", f"call_{uuid.uuid4().hex[:24]}"),
                     "type": "function",
                     "function": {
                         "name": block.get("name", ""),
                         "arguments": json.dumps(block.get("input", {}), ensure_ascii=False)
                     }
-                })
+                }
+                if block.get("caller"):
+                    tc["caller"] = block["caller"]
+                tool_calls.append(tc)
         
         # 映射停止原因
         stop_reason = response.get("stop_reason", "end_turn")
