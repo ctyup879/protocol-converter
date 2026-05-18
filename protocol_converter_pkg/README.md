@@ -563,6 +563,7 @@ python3 examples/integration_test_all_9_paths.py
 
 | 版本 | 日期 | 说明 |
 |------|------|------|
+| **v1.35.0** | 2026-05-18 | 项目结构优化：完善 .gitignore 规则、添加根目录 README、移除构建产物追踪 |
 | **v1.34.0** | 2026-05-18 | 修复流式转换中 `usage=null` 导致 `AttributeError` 的阻塞性 bug，影响 Anthropic 和 Responses 两个目标协议的流式转换 |
 | **v1.33.0** | 2026-05-18 | 官方规范三协议交叉审查：service_tier 位置修正、tool 消息合并、function_call 映射修正、minimal budget 区分等 8 项修复 |
 | **v1.32.0** | 2026-05-18 | 集成测试 API Key 改用 `.env` 文件读取，新增 10 项深度审查修复（service_tier 往返、空 delta 事件、audio_tokens 合并、done 事件缓冲等） |
@@ -573,7 +574,7 @@ python3 examples/integration_test_all_9_paths.py
 | v1.17.0 | — | 3 轮审查修复：`text.verbosity` 双向映射、`generate_summary` 往返、`cache_control` 保留等 |
 | v1.0.0 | — | 初始版本：9 路转换矩阵、流式 SSE、工具调用、多模态支持 |
 
-**当前版本**：`1.34.0`（同步更新于 `pyproject.toml` 和 `protocol_converter/__init__.py`）
+**当前版本**：`1.35.0`（同步更新于 `pyproject.toml` 和 `protocol_converter/__init__.py`）
 
 **核心依赖**：
 - Python ≥ 3.9
@@ -597,6 +598,15 @@ PYTHONPATH=. python3 examples/integration_test_responses_backend.py
 ```
 
 ## 更新日志
+
+### v1.35.0
+
+项目结构优化与版本库完善：
+
+- **完善 .gitignore**：新增 Python 编译文件、构建产物、测试覆盖率、IDE 配置、工具目录等规则
+- **添加根目录 README**：指向 `protocol_converter_pkg/README.md` 详细文档
+- **移除构建产物追踪**：从 git 中移除 `protocol_converter.egg-info/` 目录（pip install -e . 自动生成）
+- **项目结构规范化**：符合 Python 包开源项目最佳实践
 
 ### v1.34.0
 
