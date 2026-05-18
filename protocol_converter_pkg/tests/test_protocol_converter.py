@@ -1319,7 +1319,7 @@ class TestEngineNewFeatures:
         
         assert "thinking" in result
         assert result["thinking"]["type"] == "enabled"
-        assert result["thinking"]["budget_tokens"] == 1024
+        assert result["thinking"]["budget_tokens"] == 256
 
     def test_anthropic_response_with_thinking(self):
         """测试 Anthropic 响应中 thinking 块转换为 reasoning_content"""
@@ -1946,7 +1946,8 @@ class TestAnthropicUsageFieldsInChatResponse:
         engine = ProtocolConverterEngine(config)
         result = engine._anthropic_to_chat_response(anthropic_response)
         
-        assert result["usage"].get("service_tier") == "priority"
+        # service_tier 在 Chat 响应顶层（Ref: OpenAI Chat Completions API 规范）
+        assert result.get("service_tier") == "priority"
         assert result["usage"].get("inference_geo") == "us"
 
 
@@ -2105,7 +2106,7 @@ class TestAnthropicServiceTierMapping:
     """测试 Anthropic service_tier 值的正确双向映射"""
 
     def test_anthropic_response_standard_to_chat_default(self):
-        """测试 Anthropic 响应 usage.service_tier='standard' 映射为 Chat 'default'"""
+        """测试 Anthropic 响应 usage.service_tier='standard' 映射为 Chat 顶层 'default'"""
         anthropic_response = {
             "id": "msg_123",
             "type": "message",
@@ -2118,10 +2119,11 @@ class TestAnthropicServiceTierMapping:
         config = ConverterConfig(backend_type="anthropic")
         engine = ProtocolConverterEngine(config)
         result = engine._anthropic_to_chat_response(anthropic_response)
-        assert result["usage"]["service_tier"] == "default"
+        # service_tier 在 Chat 响应顶层（Ref: OpenAI Chat Completions API 规范）
+        assert result["service_tier"] == "default"
 
     def test_anthropic_response_priority_to_chat_priority(self):
-        """测试 Anthropic 响应 usage.service_tier='priority' 映射为 Chat 'priority'"""
+        """测试 Anthropic 响应 usage.service_tier='priority' 映射为 Chat 顶层 'priority'"""
         anthropic_response = {
             "id": "msg_123",
             "type": "message",
@@ -2134,10 +2136,10 @@ class TestAnthropicServiceTierMapping:
         config = ConverterConfig(backend_type="anthropic")
         engine = ProtocolConverterEngine(config)
         result = engine._anthropic_to_chat_response(anthropic_response)
-        assert result["usage"]["service_tier"] == "priority"
+        assert result["service_tier"] == "priority"
 
     def test_anthropic_response_batch_to_chat_default(self):
-        """测试 Anthropic 响应 usage.service_tier='batch' 映射为 Chat 'default'"""
+        """测试 Anthropic 响应 usage.service_tier='batch' 映射为 Chat 顶层 'default'"""
         anthropic_response = {
             "id": "msg_123",
             "type": "message",
@@ -2150,7 +2152,7 @@ class TestAnthropicServiceTierMapping:
         config = ConverterConfig(backend_type="anthropic")
         engine = ProtocolConverterEngine(config)
         result = engine._anthropic_to_chat_response(anthropic_response)
-        assert result["usage"]["service_tier"] == "default"
+        assert result["service_tier"] == "default"
 
     def test_chat_service_tier_to_anthropic(self):
         """测试 Chat service_tier 映射到 Anthropic usage.service_tier"""
@@ -6712,7 +6714,7 @@ class TestBugFixes:
         
         result = engine.convert_request(chat_request)
         assert result["thinking"]["type"] == "enabled"
-        assert result["thinking"]["budget_tokens"] == 1024
+        assert result["thinking"]["budget_tokens"] == 256
 
     def test_redacted_thinking_roundtrip_anthropic_to_chat_to_anthropic(self):
         """redacted_thinking 块应能通过 Chat 格式往返转换"""

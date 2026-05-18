@@ -374,6 +374,7 @@ class ProtocolConverterEngine:
             
             if role == "tool":
                 # tool 消息转换为 user 消息中的 tool_result 块
+                # Ref: Anthropic API 要求消息角色交替 (user/assistant)，连续 tool 消息合并为单条 user 消息
                 is_error = False
                 if isinstance(content, str):
                     tool_content = content
@@ -411,7 +412,7 @@ class ProtocolConverterEngine:
                         tool_content[0]["text"] = tool_content[0]["text"][8:]
                 else:
                     tool_content = str(content) if content is not None else ""
-                
+
                 tool_result_block = {
                     "type": "tool_result",
                     "tool_use_id": msg.get("tool_call_id", ""),
@@ -419,10 +420,17 @@ class ProtocolConverterEngine:
                 }
                 if is_error:
                     tool_result_block["is_error"] = True
-                anthropic_messages.append({
-                    "role": "user",
-                    "content": [tool_result_block]
-                })
+                # 合并连续的 tool_result 到同一条 user 消息（Anthropic 角色交替约束）
+                if (anthropic_messages
+                        and anthropic_messages[-1].get("role") == "user"
+                        and isinstance(anthropic_messages[-1].get("content"), list)
+                        and all(b.get("type") == "tool_result" for b in anthropic_messages[-1]["content"] if isinstance(b, dict))):
+                    anthropic_messages[-1]["content"].append(tool_result_block)
+                else:
+                    anthropic_messages.append({
+                        "role": "user",
+                        "content": [tool_result_block]
+                    })
                 continue
             
             if role == "assistant":
@@ -711,7 +719,7 @@ class ProtocolConverterEngine:
         if reasoning_effort:
             effort_budget_map = {
                 "none": 0,
-                "minimal": 1024,
+                "minimal": 256,
                 "low": 1024,
                 "medium": 10000,
                 "high": 32000,
@@ -1096,36 +1104,40 @@ class ProtocolConverterEngine:
                 prompt_tokens_details["cached_tokens"] = cached_tokens
             chat_usage["prompt_tokens_details"] = prompt_tokens_details
         
-        # Anthropic usage 中的 service_tier -> Chat service_tier
+        # Anthropic usage 中的 service_tier -> Chat response 顶层 service_tier
         # Anthropic response: "standard"|"priority"|"batch"
         # Chat response: "auto"|"default"|"flex"|"scale"|"priority"
+        # Ref: OpenAI Chat Completions API - service_tier 是顶层字段，不在 usage 内
         anthropic_service_tier = usage.get("service_tier")
+        chat_service_tier = None
         if anthropic_service_tier:
             from .anthropic import AnthropicConverter
-            chat_usage["service_tier"] = AnthropicConverter.RESPONSE_SERVICE_TIER_MAP.get(
+            chat_service_tier = AnthropicConverter.RESPONSE_SERVICE_TIER_MAP.get(
                 anthropic_service_tier, anthropic_service_tier
             )
         if usage.get("inference_geo"):
             chat_usage["inference_geo"] = usage["inference_geo"]
-        
+
         # Anthropic server_tool_use -> Chat 无等价字段，保留在 usage 中
         if usage.get("server_tool_use"):
             chat_usage["server_tool_use"] = usage["server_tool_use"]
-        
+
         # Anthropic cache_creation 详情 (breakdown by TTL)
         if usage.get("cache_creation"):
             chat_usage["cache_creation"] = usage["cache_creation"]
-        
+
         # 保留 Anthropic 特有的 usage 字段（用于往返转换场景）
         if usage.get("cache_creation_input_tokens"):
             chat_usage["cache_creation_input_tokens"] = usage["cache_creation_input_tokens"]
         if usage.get("cache_read_input_tokens"):
             chat_usage["cache_read_input_tokens"] = usage["cache_read_input_tokens"]
-        
+
         # 构建 message
+        # Ref: OpenAI Chat API - message 包含 refusal 字段（null 或 string）
         message = {
             "role": "assistant",
             "content": message_content,
+            "refusal": None,
         }
         if reasoning_content is not None:
             message["reasoning_content"] = reasoning_content
@@ -1134,7 +1146,7 @@ class ProtocolConverterEngine:
         # 保留 annotations（从 Anthropic citations 转换）
         if message_annotations is not None:
             message["annotations"] = message_annotations
-        
+
         result = {
             "id": response.get("id", f"chatcmpl-{uuid.uuid4().hex[:24]}"),
             "object": "chat.completion",
@@ -1143,15 +1155,21 @@ class ProtocolConverterEngine:
             "choices": [{
                 "index": 0,
                 "message": message,
-                "finish_reason": finish_reason
+                "finish_reason": finish_reason,
+                "logprobs": None,
             }],
-            "usage": chat_usage
+            "usage": chat_usage,
+            "system_fingerprint": None,
         }
-        
+
+        # service_tier 放在顶层（Ref: OpenAI Chat Completions API 规范）
+        if chat_service_tier:
+            result["service_tier"] = chat_service_tier
+
         # 保留 Anthropic container 字段（在顶层响应中）
         if response.get("container"):
             result["container"] = response["container"]
-        
+
         return result
     
     def _responses_to_chat_response(self, response: Dict[str, Any]) -> Dict[str, Any]:

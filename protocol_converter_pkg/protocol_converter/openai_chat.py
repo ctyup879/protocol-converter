@@ -140,7 +140,7 @@ class OpenAIChatConverter:
         "length": "max_tokens",
         "tool_calls": "tool_use",
         "content_filter": "refusal",
-        "function_call": "end_turn",
+        "function_call": "tool_use",  # legacy function_call is semantically tool_use
     }
     
     @classmethod
@@ -295,20 +295,31 @@ class OpenAIChatConverter:
         """转换 usage 到 Anthropic 格式"""
         if not usage:
             return None
+        cache_read = 0
+        prompt_details = usage.get("prompt_tokens_details")
+        if isinstance(prompt_details, dict):
+            cache_read = prompt_details.get("cached_tokens", 0)
         return {
             "input_tokens": usage.get("prompt_tokens", 0),
             "output_tokens": usage.get("completion_tokens", 0),
             "cache_creation_input_tokens": 0,
-            "cache_read_input_tokens": 0
+            "cache_read_input_tokens": cache_read,
         }
-    
+
     @classmethod
     def _convert_usage_to_responses(cls, usage: Optional[Dict]) -> Optional[Dict]:
         """转换 usage 到 OpenAI Responses 格式"""
         if not usage:
             return None
-        return {
+        result = {
             "input_tokens": usage.get("prompt_tokens", 0),
             "output_tokens": usage.get("completion_tokens", 0),
-            "total_tokens": usage.get("total_tokens", 0)
+            "total_tokens": usage.get("total_tokens", 0),
         }
+        prompt_details = usage.get("prompt_tokens_details")
+        if isinstance(prompt_details, dict) and prompt_details.get("cached_tokens"):
+            result["input_tokens_details"] = {"cached_tokens": prompt_details["cached_tokens"]}
+        completion_details = usage.get("completion_tokens_details")
+        if isinstance(completion_details, dict) and completion_details.get("reasoning_tokens"):
+            result["output_tokens_details"] = {"reasoning_tokens": completion_details["reasoning_tokens"]}
+        return result

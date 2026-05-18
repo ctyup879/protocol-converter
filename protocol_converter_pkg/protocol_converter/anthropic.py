@@ -107,7 +107,7 @@ class AnthropicConverter:
         "length": "max_tokens",
         "tool_calls": "tool_use",
         "content_filter": "refusal",
-        "function_call": "end_turn",
+        "function_call": "tool_use",  # legacy function_call is semantically tool_use
     }
     
     # Anthropic -> OpenAI 停止原因映射
@@ -1223,7 +1223,7 @@ class AnthropicConverter:
                 events.append({
                     "type": "error",
                     "error": {
-                        "type": "overloaded_error",
+                        "type": "invalid_request_error",
                         "message": "Content filtered by safety system"
                     }
                 })
@@ -1466,7 +1466,7 @@ class AnthropicConverter:
                 events.append({
                     "type": "error",
                     "error": {
-                        "type": "overloaded_error",
+                        "type": "invalid_request_error",
                         "message": "Content filtered by safety system"
                     }
                 })

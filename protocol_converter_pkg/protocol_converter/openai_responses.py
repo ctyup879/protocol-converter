@@ -1308,7 +1308,7 @@ class OpenAIResponsesConverter:
             if effort:
                 effort_budget_map = {
                     "none": 0,
-                    "minimal": 1024,
+                    "minimal": 256,
                     "low": 1024,
                     "medium": 10000,
                     "high": 32000,

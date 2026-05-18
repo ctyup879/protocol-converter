@@ -563,6 +563,7 @@ python3 examples/integration_test_all_9_paths.py
 
 | 版本 | 日期 | 说明 |
 |------|------|------|
+| **v1.33.0** | 2026-05-18 | 官方规范三协议交叉审查：service_tier 位置修正、tool 消息合并、function_call 映射修正、minimal budget 区分等 8 项修复 |
 | **v1.32.0** | 2026-05-18 | 集成测试 API Key 改用 `.env` 文件读取，新增 10 项深度审查修复（service_tier 往返、空 delta 事件、audio_tokens 合并、done 事件缓冲等） |
 | **v1.26.0** | 2026-05-17 | 集成测试流式覆盖补全：4 个集成测试文件均补齐跨协议流式测试，9 路全量测试支持非流式+流式双模式 |
 | **v1.25.0** | 2026-05-17 | 7 项深度审查修复：instructions 顺序修正、redacted_thinking 往返转换完善、reasoning_content→Responses encrypted_content 映射、thinking.display→reasoning.summary 映射、user→metadata.user_id 映射、流式完成事件转换 |
@@ -571,7 +572,7 @@ python3 examples/integration_test_all_9_paths.py
 | v1.17.0 | — | 3 轮审查修复：`text.verbosity` 双向映射、`generate_summary` 往返、`cache_control` 保留等 |
 | v1.0.0 | — | 初始版本：9 路转换矩阵、流式 SSE、工具调用、多模态支持 |
 
-**当前版本**：`1.32.0`（同步更新于 `pyproject.toml` 和 `protocol_converter/__init__.py`）
+**当前版本**：`1.33.0`（同步更新于 `pyproject.toml` 和 `protocol_converter/__init__.py`）
 
 **核心依赖**：
 - Python ≥ 3.9
@@ -595,6 +596,26 @@ PYTHONPATH=. python3 examples/integration_test_responses_backend.py
 ```
 
 ## 更新日志
+
+### v1.33.0
+
+基于 OpenAI Chat Completions / OpenAI Responses / Anthropic Messages 三种 API 官方规范的交叉审查，修复协议转换中的 8 项问题：
+
+| # | 级别 | 修复项 | 说明 | 涉及文件 |
+|---|------|--------|------|----------|
+| 1 | HIGH | `service_tier` 放置位置修正 | Chat 响应 `service_tier` 应在顶层，不是 `usage` 内部（Ref: OpenAI Chat Completions API response schema） | `engine.py` |
+| 2 | HIGH | 连续 `tool` 消息合并 | Anthropic 要求角色交替，连续 `tool` 消息必须合并为单个 `user` 消息（Ref: Anthropic Messages API messages constraint） | `engine.py` |
+| 3 | HIGH | `function_call` 结束原因映射修正 | `function_call` 语义等同 `tool_use`，不应映射为 `end_turn`（Ref: OpenAI Chat Completions API finish_reason） | `anthropic.py`, `openai_chat.py` |
+| 4 | HIGH | Chat 响应缺少必需字段 | 补充 `logprobs: None`、`refusal: None`、`system_fingerprint: None`（Ref: OpenAI Chat Completions API response choice schema） | `engine.py` |
+| 5 | MEDIUM | `minimal` 推理预算区分 | `minimal` 应为 256 tokens，与 `low`(1024) 区分（Ref: OpenAI `reasoning_effort` budget tiers） | `engine.py`, `openai_responses.py` |
+| 6 | MEDIUM | `content_filter` 错误类型修正 | Anthropic `error` 事件类型应为 `invalid_request_error`，不是 `overloaded_error`（Ref: Anthropic Messages API error types） | `anthropic.py` |
+| 7 | MEDIUM | Usage helper 缺少 details 字段 | `_convert_usage_to_anthropic` 和 `_convert_usage_to_responses` 未提取 `prompt_tokens_details`/`completion_tokens_details`（Ref: OpenAI Chat Completions API usage schema） | `openai_chat.py` |
+| 8 | LOW | 测试断言同步更新 | 4 处测试断言与修复后的行为保持一致 | `test_protocol_converter.py` |
+
+**测试验证：**
+
+- 394 个单元测试全部通过
+- 9 路全量集成测试全部通过
 
 ### v1.32.0
 
