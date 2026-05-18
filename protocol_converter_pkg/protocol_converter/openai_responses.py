@@ -2805,7 +2805,7 @@ class OpenAIResponsesConverter:
                 })
             
             # response.completed
-            usage = chunk.get("usage", {})
+            usage = chunk.get("usage") or {}
             response_status = "completed"
             incomplete_details = None
             error_detail = None

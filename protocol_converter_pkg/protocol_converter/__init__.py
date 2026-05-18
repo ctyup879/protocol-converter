@@ -14,7 +14,7 @@ from .exceptions import (
     StreamStateError,
 )
 
-__version__ = "1.33.0"
+__version__ = "1.34.0"
 __all__ = [
     "ProtocolConverterEngine",
     "ConverterConfig",

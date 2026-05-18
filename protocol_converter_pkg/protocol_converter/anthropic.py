@@ -1028,7 +1028,7 @@ class AnthropicConverter:
         if delta.get("role") == "assistant":
             # 重置传入的状态
             state.update(cls.create_stream_state())
-            usage = chunk.get("usage", {})
+            usage = chunk.get("usage") or {}
             events.append({
                 "type": "message_start",
                 "message": {
@@ -1195,7 +1195,7 @@ class AnthropicConverter:
                     "index": tool_idx
                 })
             
-            usage = chunk.get("usage", {})
+            usage = chunk.get("usage") or {}
             stop_reason = cls._map_stop_reason(finish_reason)
             
             stop_details = None
@@ -1259,7 +1259,7 @@ class AnthropicConverter:
         # 1. message_start 事件
         if delta.get("role") == "assistant":
             cls.reset_stream_state()
-            usage = chunk.get("usage", {})
+            usage = chunk.get("usage") or {}
             events.append({
                 "type": "message_start",
                 "message": {
@@ -1437,7 +1437,7 @@ class AnthropicConverter:
                 })
             
             # message_delta
-            usage = chunk.get("usage", {})
+            usage = chunk.get("usage") or {}
             stop_reason = cls._map_stop_reason(finish_reason)
             
             stop_details = None

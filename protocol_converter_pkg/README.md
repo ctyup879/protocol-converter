@@ -450,7 +450,7 @@ protocol_converter_pkg/
 │   ├── openai_responses.py     # OpenAI Responses 转换器
 │   └── engine.py                # 核心转换引擎
 ├── tests/
-│   └── test_protocol_converter.py   # 394 个单元测试
+│   └── test_protocol_converter.py   # 399 个单元测试
 ├── examples/
 │   ├── integration_test_chat_backend.py       # OpenAI Chat 后端集成测试
 │   ├── integration_test_anthropic_backend.py  # Anthropic 后端集成测试
@@ -494,7 +494,7 @@ pip install pytest pytest-asyncio httpx
 # 1. 进入项目目录
 cd /root/repos/ai-proxy/protocol_converter_pkg
 
-# 2. 运行全部 394 个单元测试
+# 2. 运行全部 399 个单元测试
 python3 -m pytest tests/test_protocol_converter.py -v
 
 # 3. 运行带覆盖率的测试
@@ -545,7 +545,7 @@ python3 examples/integration_test_all_9_paths.py
 
 | 测试类型 | 测试文件 | 测试数量 | 通过标准 |
 |---------|---------|---------|---------|
-| 单元测试 | `tests/test_protocol_converter.py` | 394 | 全部通过 |
+| 单元测试 | `tests/test_protocol_converter.py` | 399 | 全部通过 |
 | Chat 后端集成测试 | `examples/integration_test_chat_backend.py` | 10 | 全部通过 |
 | Anthropic 后端集成测试 | `examples/integration_test_anthropic_backend.py` | 9 | 全部通过 |
 | Responses 后端集成测试 | `examples/integration_test_responses_backend.py` | 9 | 全部通过 |
@@ -563,6 +563,7 @@ python3 examples/integration_test_all_9_paths.py
 
 | 版本 | 日期 | 说明 |
 |------|------|------|
+| **v1.34.0** | 2026-05-18 | 修复流式转换中 `usage=null` 导致 `AttributeError` 的阻塞性 bug，影响 Anthropic 和 Responses 两个目标协议的流式转换 |
 | **v1.33.0** | 2026-05-18 | 官方规范三协议交叉审查：service_tier 位置修正、tool 消息合并、function_call 映射修正、minimal budget 区分等 8 项修复 |
 | **v1.32.0** | 2026-05-18 | 集成测试 API Key 改用 `.env` 文件读取，新增 10 项深度审查修复（service_tier 往返、空 delta 事件、audio_tokens 合并、done 事件缓冲等） |
 | **v1.26.0** | 2026-05-17 | 集成测试流式覆盖补全：4 个集成测试文件均补齐跨协议流式测试，9 路全量测试支持非流式+流式双模式 |
@@ -572,7 +573,7 @@ python3 examples/integration_test_all_9_paths.py
 | v1.17.0 | — | 3 轮审查修复：`text.verbosity` 双向映射、`generate_summary` 往返、`cache_control` 保留等 |
 | v1.0.0 | — | 初始版本：9 路转换矩阵、流式 SSE、工具调用、多模态支持 |
 
-**当前版本**：`1.33.0`（同步更新于 `pyproject.toml` 和 `protocol_converter/__init__.py`）
+**当前版本**：`1.34.0`（同步更新于 `pyproject.toml` 和 `protocol_converter/__init__.py`）
 
 **核心依赖**：
 - Python ≥ 3.9
@@ -582,7 +583,7 @@ python3 examples/integration_test_all_9_paths.py
 **测试执行**：
 
 ```bash
-# 单元测试（394 个测试用例）
+# 单元测试（399 个测试用例）
 cd protocol_converter_pkg
 PYTHONPATH=. python3 -m pytest tests/test_protocol_converter.py -v
 
@@ -596,6 +597,30 @@ PYTHONPATH=. python3 examples/integration_test_responses_backend.py
 ```
 
 ## 更新日志
+
+### v1.34.0
+
+修复流式转换中 `usage=null` 导致 `AttributeError` 的阻塞性 bug：
+
+**问题**：OpenAI Chat Completions 流式 SSE 响应中，中间 chunk 的 `usage` 字段为 `null`（这是 OpenAI 官方定义的正常行为，`ChatCompletionChunk.usage` 类型为 `Optional[CompletionUsage]`，仅最后一个 chunk 包含实际值）。但转换代码使用 `chunk.get("usage", {})` 获取 usage，当键存在且值为 `None` 时返回 `None`（而非 `{}`），后续 `usage.get(...)` 调用抛出 `AttributeError`。
+
+**修复**：将所有受影响位置的 `chunk.get("usage", {})` 改为 `chunk.get("usage") or {}`，确保 `None` 值回退为空字典。
+
+| 文件 | 方法 | 场景 |
+|------|------|------|
+| `anthropic.py` | `convert_stream_chunk_with_state` | `message_start` 事件和 `finish_reason` 结束 |
+| `anthropic.py` | `convert_stream_chunk` | `message_start` 事件和 `finish_reason` 结束 |
+| `openai_responses.py` | `convert_stream_chunk` | `response.completed` 事件 |
+
+**规范依据**：
+
+- OpenAI Python SDK `ChatCompletionChunk.usage: Optional[CompletionUsage] = None`，文档明确指出中间 chunk 包含 null 值
+- Anthropic SDK `Usage.input_tokens` / `Usage.output_tokens` 为必填字段，null 时默认为 0 是正确行为
+
+**测试验证**：
+
+- 399 个单元测试全部通过（新增 5 个覆盖此修复）
+- 9 路全量集成测试全部通过
 
 ### v1.33.0
 
@@ -614,7 +639,7 @@ PYTHONPATH=. python3 examples/integration_test_responses_backend.py
 
 **测试验证：**
 
-- 394 个单元测试全部通过
+- 399 个单元测试全部通过
 - 9 路全量集成测试全部通过
 
 ### v1.32.0

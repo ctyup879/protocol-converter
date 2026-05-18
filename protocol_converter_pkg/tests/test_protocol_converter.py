@@ -1054,6 +1054,115 @@ class TestAnthropicStreamingSequence:
         # message_stop 必须是最后一个事件
         assert events[-1]["type"] == "message_stop"
 
+    def test_usage_null_in_message_start(self):
+        """测试 usage 为 null 时 message_start 不崩溃（OpenAI 流式中间 chunk usage 通常为 null）"""
+        chunk = {
+            "id": "chatcmpl-123",
+            "model": "qwen3.5-plus",
+            "choices": [{
+                "delta": {"role": "assistant"},
+                "index": 0
+            }],
+            "usage": None
+        }
+        
+        events = AnthropicConverter.convert_stream_chunk(chunk)
+        
+        assert isinstance(events, list)
+        assert events[0]["type"] == "message_start"
+        assert events[0]["message"]["usage"]["input_tokens"] == 0
+        assert events[0]["message"]["usage"]["output_tokens"] == 0
+
+    def test_usage_null_in_finish_reason(self):
+        """测试 usage 为 null 时 finish_reason chunk 不崩溃"""
+        start_chunk = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{"delta": {"role": "assistant"}, "index": 0}]
+        }
+        AnthropicConverter.convert_stream_chunk(start_chunk)
+        
+        text_chunk = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{"delta": {"content": "Hello"}, "index": 0}]
+        }
+        AnthropicConverter.convert_stream_chunk(text_chunk)
+        
+        finish_chunk = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{
+                "delta": {},
+                "finish_reason": "stop",
+                "index": 0
+            }],
+            "usage": None
+        }
+        
+        events = AnthropicConverter.convert_stream_chunk(finish_chunk)
+        
+        event_types = [e["type"] for e in events]
+        assert "message_delta" in event_types
+        assert "message_stop" in event_types
+        for e in events:
+            if e["type"] == "message_delta":
+                assert e["usage"]["output_tokens"] == 0
+
+    def test_usage_null_with_state(self):
+        """测试 convert_stream_chunk_with_state 在 usage 为 null 时不崩溃"""
+        state = AnthropicConverter.create_stream_state()
+        
+        chunk = {
+            "id": "chatcmpl-123",
+            "model": "qwen3.5-plus",
+            "choices": [{
+                "delta": {"role": "assistant"},
+                "index": 0
+            }],
+            "usage": None
+        }
+        
+        events = AnthropicConverter.convert_stream_chunk_with_state(chunk, state)
+        
+        assert isinstance(events, list)
+        assert events[0]["type"] == "message_start"
+        assert events[0]["message"]["usage"]["input_tokens"] == 0
+
+    def test_usage_null_with_state_finish(self):
+        """测试 convert_stream_chunk_with_state 在 finish_reason chunk 中 usage 为 null 时不崩溃"""
+        state = AnthropicConverter.create_stream_state()
+        
+        start_chunk = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{"delta": {"role": "assistant"}, "index": 0}]
+        }
+        AnthropicConverter.convert_stream_chunk_with_state(start_chunk, state)
+        
+        text_chunk = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{"delta": {"content": "Hello"}, "index": 0}]
+        }
+        AnthropicConverter.convert_stream_chunk_with_state(text_chunk, state)
+        
+        finish_chunk = {
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{
+                "delta": {},
+                "finish_reason": "stop",
+                "index": 0
+            }],
+            "usage": None
+        }
+        
+        events = AnthropicConverter.convert_stream_chunk_with_state(finish_chunk, state)
+        
+        event_types = [e["type"] for e in events]
+        assert "message_delta" in event_types
+
     def test_thinking_delta(self):
         """测试 thinking 内容转换为 thinking_delta"""
         start_chunk = {
@@ -1157,6 +1266,41 @@ class TestResponsesStreamingSequence:
         assert len(events) == 2
         assert events[0]["type"] == "response.created"
         assert events[1]["type"] == "response.in_progress"
+
+    def test_usage_null_in_response_completed(self):
+        """测试 usage 为 null 时 response.completed 不崩溃"""
+        start_chunk = {
+            "id": "resp_123",
+            "model": "gpt-4o",
+            "choices": [{"delta": {"role": "assistant"}, "index": 0}]
+        }
+        OpenAIResponsesConverter.convert_stream_chunk(start_chunk)
+        
+        text_chunk = {
+            "id": "resp_123",
+            "model": "gpt-4o",
+            "choices": [{"delta": {"content": "Hello"}, "index": 0}]
+        }
+        OpenAIResponsesConverter.convert_stream_chunk(text_chunk)
+        
+        finish_chunk = {
+            "id": "resp_123",
+            "model": "gpt-4o",
+            "choices": [{
+                "delta": {},
+                "finish_reason": "stop",
+                "index": 0
+            }],
+            "usage": None
+        }
+        
+        events = OpenAIResponsesConverter.convert_stream_chunk(finish_chunk)
+        
+        event_types = [e["type"] for e in events]
+        assert "response.completed" in event_types
+        completed_event = [e for e in events if e["type"] == "response.completed"][0]
+        assert completed_event["response"]["usage"]["input_tokens"] == 0
+        assert completed_event["response"]["usage"]["output_tokens"] == 0
 
     def test_text_delta_with_item_added(self):
         """测试文本增量包含 output_item.added 和 content_part.added"""
