@@ -303,9 +303,9 @@ class OpenAIResponsesConverter:
             chat_request["user"] = request["user"]
         
         # 7. 处理 store 参数
-        if request.get("store") is not None:
-            chat_request["store"] = request["store"]
-        
+        # Note: Chat API 不支持 store 参数，Responses → Chat 转换时不传递
+        # store 参数仅在 Responses API 中有效，用于控制响应存储行为
+
         # 8. 处理 reasoning 参数 -> reasoning_effort
         reasoning = request.get("reasoning")
         if reasoning and isinstance(reasoning, dict):
@@ -388,17 +388,18 @@ class OpenAIResponsesConverter:
             extra["conversation"] = request["conversation"]
         if request.get("context_management"):
             extra["context_management"] = request["context_management"]
+        # 12.5 Responses 特有参数 - Chat API 兼容性修复
+        # Note: Chat API 不支持这些 Responses 特有参数，放入 extra_body 供后端兼容性处理
         if request.get("include"):
             extra["include"] = request["include"]
         if request.get("prompt"):
             extra["prompt"] = request["prompt"]
-        # 以下参数在 Chat API 中为原生顶层参数，不应放入 extra_body
         if request.get("safety_identifier"):
-            chat_request["safety_identifier"] = request["safety_identifier"]
+            extra["safety_identifier"] = request["safety_identifier"]
         if request.get("prompt_cache_key"):
-            chat_request["prompt_cache_key"] = request["prompt_cache_key"]
+            extra["prompt_cache_key"] = request["prompt_cache_key"]
         if request.get("prompt_cache_retention"):
-            chat_request["prompt_cache_retention"] = request["prompt_cache_retention"]
+            extra["prompt_cache_retention"] = request["prompt_cache_retention"]
         # stream_options: Responses include_obfuscation 不等价于 Chat include_usage
         # Responses stream_options.include_obfuscation → Chat 不支持，放入 extra_body
         if request.get("stream_options"):

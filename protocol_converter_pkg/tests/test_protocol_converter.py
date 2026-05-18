@@ -3181,38 +3181,41 @@ class TestResponsesTopLevelParams:
         assert result.get("top_logprobs") == 5
         assert result.get("extra_body", {}).get("top_logprobs") is None
 
-    def test_safety_identifier_as_toplevel(self):
-        """测试 safety_identifier 应为 Chat 顶层参数"""
+    def test_safety_identifier_in_extra_body(self):
+        """测试 safety_identifier (Responses 特有) 应放入 extra_body，Chat API 不支持"""
         request = {
             "model": "gpt-4o",
             "input": "Hello",
             "safety_identifier": "user_abc"
         }
         result = OpenAIResponsesConverter.to_openai_chat(request)
-        assert result.get("safety_identifier") == "user_abc"
-        assert result.get("extra_body", {}).get("safety_identifier") is None
+        # safety_identifier 不应在顶层 - Chat API 不支持此参数
+        assert result.get("safety_identifier") is None
+        assert result.get("extra_body", {}).get("safety_identifier") == "user_abc"
 
-    def test_prompt_cache_key_as_toplevel(self):
-        """测试 prompt_cache_key 应为 Chat 顶层参数"""
+    def test_prompt_cache_key_in_extra_body(self):
+        """测试 prompt_cache_key (Responses 特有) 应放入 extra_body，Chat API 不支持"""
         request = {
             "model": "gpt-4o",
             "input": "Hello",
             "prompt_cache_key": "cache_123"
         }
         result = OpenAIResponsesConverter.to_openai_chat(request)
-        assert result.get("prompt_cache_key") == "cache_123"
-        assert result.get("extra_body", {}).get("prompt_cache_key") is None
+        # prompt_cache_key 不应在顶层 - Chat API 不支持此参数
+        assert result.get("prompt_cache_key") is None
+        assert result.get("extra_body", {}).get("prompt_cache_key") == "cache_123"
 
-    def test_prompt_cache_retention_as_toplevel(self):
-        """测试 prompt_cache_retention 应为 Chat 顶层参数"""
+    def test_prompt_cache_retention_in_extra_body(self):
+        """测试 prompt_cache_retention (Responses 特有) 应放入 extra_body，Chat API 不支持"""
         request = {
             "model": "gpt-4o",
             "input": "Hello",
             "prompt_cache_retention": "24h"
         }
         result = OpenAIResponsesConverter.to_openai_chat(request)
-        assert result.get("prompt_cache_retention") == "24h"
-        assert result.get("extra_body", {}).get("prompt_cache_retention") is None
+        # prompt_cache_retention 不应在顶层 - Chat API 不支持此参数
+        assert result.get("prompt_cache_retention") is None
+        assert result.get("extra_body", {}).get("prompt_cache_retention") == "24h"
 
     def test_stream_options_as_toplevel(self):
         """测试 stream_options 处理：include_obfuscation 是 Responses 特有字段，放入 extra_body"""
@@ -3237,6 +3240,54 @@ class TestResponsesTopLevelParams:
         result = OpenAIResponsesConverter.to_openai_chat(request)
         # include_usage 是 Chat API 原生支持的 stream_options 字段，直接传递
         assert result.get("stream_options") == {"include_usage": True}
+
+    def test_responses_to_chat_unsupported_params_filtered(self):
+        """测试 Responses→Chat 转换时不支持的参数被正确过滤（Issue #修复）
+
+        此测试验证以下 Responses 特有参数不会出现在 Chat 请求中：
+        - store: Chat API 不支持
+        - include: Chat API 不支持
+        - prompt_cache_key: Chat API 不支持
+        - prompt_cache_retention: Chat API 不支持
+        - safety_identifier: Chat API 不支持
+        """
+        from protocol_converter import ProtocolConverterEngine
+
+        engine = ProtocolConverterEngine()
+
+        responses_request = {
+            "model": "gpt-5",
+            "input": "hello",
+            "stream": True,
+            "reasoning": {"effort": "minimal"},
+            "store": True,
+            "instructions": "You are a helpful assistant",
+            "include": ["web_search_call.action.sources"],
+            "prompt_cache_key": "my-cache-key",
+            "safety_identifier": "safety-123",
+            "prompt_cache_retention": "24h"
+        }
+
+        # 通过 engine.convert_request 转换（模拟实际使用场景）
+        chat_request = engine.convert_request(responses_request, target_format="openai_chat")
+
+        # reasoning_effort 应该存在（从 reasoning.effort 映射）
+        assert chat_request.get("reasoning_effort") == "minimal"
+
+        # 以下参数不应该出现在 Chat 请求的顶层
+        assert chat_request.get("store") is None, "store 不应出现在 Chat 请求中"
+        assert chat_request.get("include") is None, "include 不应出现在 Chat 请求中"
+        assert chat_request.get("prompt_cache_key") is None, "prompt_cache_key 不应出现在 Chat 请求中"
+        assert chat_request.get("safety_identifier") is None, "safety_identifier 不应出现在 Chat 请求中"
+        assert chat_request.get("prompt_cache_retention") is None, "prompt_cache_retention 不应出现在 Chat 请求中"
+        assert chat_request.get("instructions") is None, "instructions 不应出现在 Chat 请求中（已转换为 developer 消息）"
+
+        # messages 应该包含 system 消息（从 instructions 转换）
+        # engine.py 会将 developer 降级为 system
+        messages = chat_request.get("messages", [])
+        system_msgs = [m for m in messages if m.get("role") == "system"]
+        assert len(system_msgs) > 0, "instructions 应转换为 system 消息"
+        assert system_msgs[0].get("content") == "You are a helpful assistant"
 
 
 class TestMaxCompletionTokensZero:

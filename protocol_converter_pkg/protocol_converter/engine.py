@@ -307,15 +307,26 @@ class ProtocolConverterEngine:
             for msg in messages:
                 if isinstance(msg, dict) and msg.get("role") == "developer":
                     msg["role"] = "system"
-        
+
         # 合并 extra_body
+        # Note: 当目标格式是 openai_chat 时，不合并 Responses 特有参数到顶层
+        # 这些参数在 Chat API 中不被支持，会导致后端返回 400 错误
         if isinstance(result, dict) and "extra_body" in result:
             extra = result.pop("extra_body")
             if isinstance(extra, dict):
+                # Responses 特有参数列表 - Chat API 不支持，应保持移除状态
+                responses_only_params = {
+                    'include', 'store', 'prompt_cache_key', 'prompt_cache_retention',
+                    'safety_identifier', 'previous_response_id', 'background',
+                    'max_tool_calls', 'conversation', 'context_management', 'prompt'
+                }
                 for key, value in extra.items():
+                    # 当目标是 Chat API 时，跳过不支持的参数
+                    if target_format == "openai_chat" and key in responses_only_params:
+                        continue
                     if key not in result:
                         result[key] = value
-        
+
         return result
     
     def _get_target_format(self) -> str:
@@ -1406,12 +1417,20 @@ class ProtocolConverterEngine:
                 data_str = line[5:].strip()
                 if data_str == "[DONE]":
                     # 根据目标协议发送结束事件
+                    # Note: Chat API 使用 [DONE] 作为结束标记
+                    # Anthropic 使用 message_stop 事件
+                    # Responses 使用 response.completed 事件
+                    # 注意：当后端是 Responses 时，[DONE] 是 Chat 代理添加的，
+                    # 不应再次发送 response.completed（已在 SSE 事件中发送）
                     if source_protocol == Protocol.ANTHROPIC:
                         yield StreamChunk(event="message_stop", data={"type": "message_stop"}).to_anthropic_sse()
-                    elif source_protocol == Protocol.OPENAI_RESPONSES:
+                    elif source_protocol == Protocol.OPENAI_RESPONSES and backend_format != "openai_responses":
+                        # 只有当目标协议是 Responses 且后端不是 Responses 时才发送
+                        # (否则 completion 事件已在 SSE 事件中发送)
                         yield StreamChunk(event="response.completed", data={"type": "response.completed"}).to_sse()
-                    else:
+                    elif source_protocol == Protocol.OPENAI_CHAT:
                         yield "data: [DONE]\n\n"
+                    # [DONE] 信号直接 break，不发送额外事件
                     break
                 
                 # 保存当前 event type 并清空，供后续各分支使用
