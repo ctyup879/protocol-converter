@@ -563,6 +563,7 @@ python3 examples/integration_test_all_9_paths.py
 
 | 版本 | 日期 | 说明 |
 |------|------|------|
+| **v1.38.0** | 2026-05-19 | 修复 Anthropic → Chat 转换时参数过滤问题：移除 output_config/thinking/context_management/metadata/top_k/cache_control/container/inference_geo/output_format 等 Anthropic 特有字段，防止后端 400 错误 |
 | **v1.37.0** | 2026-05-18 | 修复 Responses → Chat 转换时参数过滤问题：移除 store/include/prompt_cache_key/safety_identifier/prompt_cache_retention 等不支持字段；优化流式结束信号处理避免重复 |
 | **v1.36.0** | 2026-05-18 | (PyPI 重发布) Responses → Chat 参数过滤修复、流式结束信号优化 |
 | **v1.35.0** | 2026-05-18 | 项目结构优化：完善 .gitignore 规则、添加根目录 README、移除构建产物追踪 |
@@ -576,7 +577,7 @@ python3 examples/integration_test_all_9_paths.py
 | v1.17.0 | — | 3 轮审查修复：`text.verbosity` 双向映射、`generate_summary` 往返、`cache_control` 保留等 |
 | v1.0.0 | — | 初始版本：9 路转换矩阵、流式 SSE、工具调用、多模态支持 |
 
-**当前版本**：`1.37.0`（同步更新于 `pyproject.toml` 和 `protocol_converter/__init__.py`）
+**当前版本**：`1.38.0`（同步更新于 `pyproject.toml` 和 `protocol_converter/__init__.py`）
 
 **核心依赖**：
 - Python ≥ 3.9
@@ -586,7 +587,7 @@ python3 examples/integration_test_all_9_paths.py
 **测试执行**：
 
 ```bash
-# 单元测试（399 个测试用例）
+# 单元测试（415 个测试用例）
 cd protocol_converter_pkg
 PYTHONPATH=. python3 -m pytest tests/test_protocol_converter.py -v
 
@@ -600,6 +601,28 @@ PYTHONPATH=. python3 examples/integration_test_responses_backend.py
 ```
 
 ## 更新日志
+
+### v1.38.0
+
+修复 Anthropic Messages → OpenAI Chat 转换时的参数过滤问题：
+
+**问题**：Anthropic 特有参数（`output_config`、`thinking`、`context_management`、`metadata`、`top_k`、`cache_control`、`container`、`inference_geo`、`output_format`）在转换后残留在 Chat 请求顶层，导致后端返回 400 错误（`Unknown parameter: 'output_config'.` 等）。
+
+**影响场景**：Claude Code（Anthropic CLI 客户端）通过代理访问 OpenAI 兼容后端时直接报错。
+
+**修复**：
+- `engine.py`：`convert_request()` 合并 `extra_body` 时增加 `anthropic_only_params` 过滤集合，当目标格式为 `openai_chat` 时跳过这些参数
+- `engine.py`：`convert_and_forward()` 的 `extra_body` 合并逻辑同步增加过滤
+- `tests/`：新增 `TestAnthropicToChatParamFiltering` 测试类（15 个测试用例），覆盖参数移除、映射验证和透传保留
+
+**过滤的 Anthropic 特有参数**：`top_k`、`thinking`、`cache_control`、`container`、`output_config`、`inference_geo`、`metadata`、`original_service_tier`、`anthropic_server_tools`、`context_management`、`output_format`
+
+**保留的映射关系**：
+- `thinking` → `reasoning_effort`（Chat 等价参数）
+- `output_config.format` → `response_format`（Chat 等价参数）
+- `output_config.effort` → `reasoning_effort`（Chat 等价参数）
+- `output_format` → `response_format`（Chat 等价参数）
+- `metadata.user_id` → `user`（Chat 等价参数）
 
 ### v1.37.0
 

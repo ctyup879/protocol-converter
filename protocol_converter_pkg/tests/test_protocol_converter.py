@@ -7715,3 +7715,153 @@ class TestHTTPClientStreamingSupport:
         # 如果 httpx 已安装，客户端应能正常创建
         client = create_http_client()
         assert callable(client)
+
+
+class TestAnthropicToChatParamFiltering:
+    """Anthropic → Chat 转换后不应残留 Anthropic 特有参数"""
+
+    def _make_full_anthropic_request(self):
+        return {
+            "model": "claude-opus-4",
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": 4096,
+            "stream": True,
+            "system": "You are helpful",
+            "tools": [{"name": "test", "input_schema": {"type": "object"}}],
+            "metadata": {"user_id": "test_user"},
+            "thinking": {"type": "enabled", "budget_tokens": 1024},
+            "context_management": {"preserve_context": True},
+            "output_config": {"thinking": {"type": "enabled"}},
+            "top_k": 10,
+            "cache_control": {"type": "ephemeral"},
+            "container": {"type": "some_container"},
+            "inference_geo": {"country": "US"},
+            "output_format": {"type": "json_object"},
+        }
+
+    def test_output_config_removed_in_chat(self):
+        """output_config 不应残留到 Chat 请求顶层"""
+        engine = ProtocolConverterEngine()
+        result = engine.convert_request(self._make_full_anthropic_request(), target_format="openai_chat")
+        assert "output_config" not in result
+
+    def test_thinking_removed_in_chat(self):
+        """thinking 不应残留到 Chat 请求顶层"""
+        engine = ProtocolConverterEngine()
+        result = engine.convert_request(self._make_full_anthropic_request(), target_format="openai_chat")
+        assert "thinking" not in result
+
+    def test_context_management_removed_in_chat(self):
+        """context_management 不应残留到 Chat 请求顶层"""
+        engine = ProtocolConverterEngine()
+        result = engine.convert_request(self._make_full_anthropic_request(), target_format="openai_chat")
+        assert "context_management" not in result
+
+    def test_metadata_removed_in_chat(self):
+        """metadata 不应残留到 Chat 请求顶层"""
+        engine = ProtocolConverterEngine()
+        result = engine.convert_request(self._make_full_anthropic_request(), target_format="openai_chat")
+        assert "metadata" not in result
+
+    def test_top_k_removed_in_chat(self):
+        """top_k 不应残留到 Chat 请求顶层"""
+        engine = ProtocolConverterEngine()
+        result = engine.convert_request(self._make_full_anthropic_request(), target_format="openai_chat")
+        assert "top_k" not in result
+
+    def test_cache_control_removed_in_chat(self):
+        """cache_control 不应残留到 Chat 请求顶层"""
+        engine = ProtocolConverterEngine()
+        result = engine.convert_request(self._make_full_anthropic_request(), target_format="openai_chat")
+        assert "cache_control" not in result
+
+    def test_container_removed_in_chat(self):
+        """container 不应残留到 Chat 请求顶层"""
+        engine = ProtocolConverterEngine()
+        result = engine.convert_request(self._make_full_anthropic_request(), target_format="openai_chat")
+        assert "container" not in result
+
+    def test_inference_geo_removed_in_chat(self):
+        """inference_geo 不应残留到 Chat 请求顶层"""
+        engine = ProtocolConverterEngine()
+        result = engine.convert_request(self._make_full_anthropic_request(), target_format="openai_chat")
+        assert "inference_geo" not in result
+
+    def test_output_format_removed_in_chat(self):
+        """output_format 不应残留到 Chat 请求顶层"""
+        engine = ProtocolConverterEngine()
+        result = engine.convert_request(self._make_full_anthropic_request(), target_format="openai_chat")
+        assert "output_format" not in result
+
+    def test_extra_body_removed_in_chat(self):
+        """extra_body 不应残留到 Chat 请求顶层"""
+        engine = ProtocolConverterEngine()
+        result = engine.convert_request(self._make_full_anthropic_request(), target_format="openai_chat")
+        assert "extra_body" not in result
+
+    def test_chat_valid_params_preserved(self):
+        """Chat API 支持的参数应正确保留"""
+        engine = ProtocolConverterEngine()
+        result = engine.convert_request(self._make_full_anthropic_request(), target_format="openai_chat")
+        assert "model" in result
+        assert "messages" in result
+        assert "max_completion_tokens" in result
+        assert result["max_completion_tokens"] == 4096
+        assert "stream" in result
+        assert result["stream"] is True
+        assert "tools" in result
+        assert "reasoning_effort" in result
+        assert "response_format" in result
+        assert "user" in result
+        assert result["user"] == "test_user"
+
+    def test_anthropic_passthrough_preserves_all_params(self):
+        """Anthropic→Anthropic 透传应保留所有参数"""
+        config = ConverterConfig(backend_type="anthropic")
+        engine = ProtocolConverterEngine(config)
+        result = engine.convert_request(self._make_full_anthropic_request())
+        assert "output_config" in result
+        assert "thinking" in result
+        assert "context_management" in result
+        assert "metadata" in result
+        assert "top_k" in result
+        assert "cache_control" in result
+        assert "container" in result
+        assert "inference_geo" in result
+
+    def test_minimal_request_no_side_effects(self):
+        """最小请求转换不应引入多余参数"""
+        engine = ProtocolConverterEngine()
+        request = {
+            "model": "claude-sonnet-4",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 2048,
+        }
+        result = engine.convert_request(request, target_format="openai_chat")
+        assert set(result.keys()) == {"model", "messages", "max_completion_tokens"}
+
+    def test_thinking_maps_to_reasoning_effort(self):
+        """thinking 应映射为 reasoning_effort 而非残留"""
+        engine = ProtocolConverterEngine()
+        request = {
+            "model": "claude-sonnet-4",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 2048,
+            "thinking": {"type": "enabled", "budget_tokens": 1024},
+        }
+        result = engine.convert_request(request, target_format="openai_chat")
+        assert "thinking" not in result
+        assert "reasoning_effort" in result
+
+    def test_output_config_maps_to_response_format(self):
+        """output_config.format 应映射为 response_format 而非残留"""
+        engine = ProtocolConverterEngine()
+        request = {
+            "model": "claude-sonnet-4",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 2048,
+            "output_config": {"format": {"type": "json_object"}},
+        }
+        result = engine.convert_request(request, target_format="openai_chat")
+        assert "output_config" not in result
+        assert "response_format" in result

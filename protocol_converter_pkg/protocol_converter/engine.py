@@ -309,20 +309,26 @@ class ProtocolConverterEngine:
                     msg["role"] = "system"
 
         # 合并 extra_body
-        # Note: 当目标格式是 openai_chat 时，不合并 Responses 特有参数到顶层
+        # Note: 当目标格式是 openai_chat 时，不合并 Responses/Anthropic 特有参数到顶层
         # 这些参数在 Chat API 中不被支持，会导致后端返回 400 错误
         if isinstance(result, dict) and "extra_body" in result:
             extra = result.pop("extra_body")
             if isinstance(extra, dict):
-                # Responses 特有参数列表 - Chat API 不支持，应保持移除状态
                 responses_only_params = {
                     'include', 'store', 'prompt_cache_key', 'prompt_cache_retention',
                     'safety_identifier', 'previous_response_id', 'background',
-                    'max_tool_calls', 'conversation', 'context_management', 'prompt'
+                    'max_tool_calls', 'conversation', 'prompt'
+                }
+                anthropic_only_params = {
+                    'top_k', 'thinking', 'cache_control', 'container',
+                    'output_config', 'inference_geo', 'metadata',
+                    'original_service_tier', 'anthropic_server_tools',
+                    'context_management', 'output_format',
                 }
                 for key, value in extra.items():
-                    # 当目标是 Chat API 时，跳过不支持的参数
                     if target_format == "openai_chat" and key in responses_only_params:
+                        continue
+                    if target_format == "openai_chat" and key in anthropic_only_params:
                         continue
                     if key not in result:
                         result[key] = value
@@ -1310,7 +1316,23 @@ class ProtocolConverterEngine:
         if isinstance(backend_request, dict) and "extra_body" in backend_request:
             extra = backend_request.pop("extra_body")
             if isinstance(extra, dict):
+                target_format = self._get_target_format()
+                anthropic_only_params = {
+                    'top_k', 'thinking', 'cache_control', 'container',
+                    'output_config', 'inference_geo', 'metadata',
+                    'original_service_tier', 'anthropic_server_tools',
+                    'context_management', 'output_format',
+                }
+                responses_only_params = {
+                    'include', 'store', 'prompt_cache_key', 'prompt_cache_retention',
+                    'safety_identifier', 'previous_response_id', 'background',
+                    'max_tool_calls', 'conversation', 'prompt',
+                }
                 for key, value in extra.items():
+                    if target_format == "openai_chat" and key in anthropic_only_params:
+                        continue
+                    if target_format == "openai_chat" and key in responses_only_params:
+                        continue
                     if key not in backend_request:
                         backend_request[key] = value
         
